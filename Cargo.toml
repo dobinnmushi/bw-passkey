@@ -1,0 +1,18 @@
+[package]
+name = "bw-passkey"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Virtual FIDO2 security key backed by the passkeys in your Bitwarden vault (via rbw)"
+
+[dependencies]
+soft-fido2 = { version = "0.19", default-features = false, features = ["std"] }
+soft-fido2-ctap = "0.19"
+soft-fido2-transport = "0.19"
+base64 = "0.22"
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+p256 = { version = "0.13", features = ["pkcs8"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false }
+libc = "0.2"

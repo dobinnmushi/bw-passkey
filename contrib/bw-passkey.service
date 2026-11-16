@@ -1,0 +1,13 @@
+[Unit]
+Description=bw-passkey: virtual FIDO2 security key backed by the passkeys in your Bitwarden vault
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/bw-passkey
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
