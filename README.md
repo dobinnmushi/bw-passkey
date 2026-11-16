@@ -64,6 +64,9 @@ logged in. Logs: `journalctl --user -u bw-passkey`. `./uninstall.sh` removes bot
   Lock your screen when you leave.
 - Passkeys imported with a non-zero counter are answered with counter 0; a site may reject that.
 - Passkeys are always created as discoverable (resident) credentials, so they are all stored in the vault.
+- Snap or Flatpak apps can only use security keys if their confinement allows it (for snaps, the
+  `u2f-devices` interface). Firefox's snap has it; for example the Discord and Slack snaps do not, so sign in
+  to those services in a browser instead. Electron apps otherwise use the same WebAuthn code as Chrome.
 
 ## License
 AGPL-3.0-or-later (soft-fido2 is AGPL-3.0).

@@ -1,4 +1,5 @@
 //! 本人確認（指紋）。bw-autotype と同じ方針:
+//! - 保管庫がロック中なら、マスターパスワードで開くこと自体を本人確認とする。
 //! - 指紋（fprintd-verify）が一致すれば通す。
 //! - 指紋が使えない・一致しないときは、保管庫をロックし直してマスターパスワードを聞く（それより弱い経路にしない）。
 //! - 同じサイトについて直前（数秒以内）に確認が済んでいれば、続く「本人の操作の確認（UP）」はもう一度求めない。
@@ -81,7 +82,15 @@ impl Verifier {
 
     /// 本人確認（UV）。通れば true
     pub fn verify(&self, rp_id: &str) -> bool {
-        let ok = if fingerprint(rp_id) {
+        let ok = if !Command::new("rbw").arg("unlocked").status().is_ok_and(|s| s.success()) {
+            // 保管庫がロック中: マスターパスワードで開くこと自体を本人確認とする（指紋と二重に求めない）
+            log::info!("verification: vault locked, unlocking with the master password ({rp_id})");
+            let nid = notify(&tr!("{rp_id} でパスキーを使います。保管庫を開いてください",
+                                  "Using a passkey for {rp_id}. Unlock the vault"), None);
+            let ok = Command::new("rbw").arg("unlock").status().is_ok_and(|s| s.success());
+            close_notification(nid);
+            ok
+        } else if fingerprint(rp_id) {
             log::info!("verification: fingerprint ok ({rp_id})");
             true
         } else {
