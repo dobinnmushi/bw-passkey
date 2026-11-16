@@ -17,14 +17,18 @@
   既存のログイン項目にパスキーを足すことはできない（rbw-agent が項目ごとの鍵での暗号化に対応しないため）。
 - [soft-fido2](https://github.com/pando85/soft-fido2)（CTAP 2.x と uhid）と [rbw](https://github.com/doy/rbw) を使う。
   [bw-autotype](https://github.com/dobinnmushi/bw-autotype)（GNOME/Wayland でパスワードを入力する道具）の姉妹品だが、単独で動く。
-- 通知は LANG に合わせて日本語か英語。
+- **選ぶ**: 同じサイトに複数のアカウントがあれば、専用の窓で選べる（項目名・ユーザー名・表示名。前回のものが先頭）。
+  ブラウザの、名前だけの一覧は使わない。
+- 通知と窓は LANG に合わせて日本語か英語。
 
 Ubuntu 26.04（GNOME 50 / Wayland）の Firefox（Snap 版）と Google Chrome で、実際のサイトでのログインと作成を試している。
 Chrome では、Google パスワード マネージャーが出てきたら「別のデバイス・セキュリティ キー」を選ぶか、その提案を切る。
 
 ## 仕組み
 1. サイトがパスキーを求めると、ブラウザがキーに本人確認を頼む。bw-passkey は通知を出して指紋を待つ。
-   だめなら保管庫をロックし直してマスターパスワードを聞く（それより弱い経路にはしない）。同じサイトの続く要求には、その確認を使い回す。
+   だめなら保管庫をロックし直してマスターパスワードを聞く（それより弱い経路にはしない）。保管庫がロック中なら、開くこと自体を本人確認とする。
+   同じサイトの続く要求には、その確認を使い回す。
+   サイトがアカウントを指定せず、保管庫にそのサイトのパスキーが複数あれば、専用の窓（`bw-passkey --choose`）で1件を選び、それだけをブラウザに渡す。
 2. rbw のアクセストークンで保管庫（`/sync`）を取り（古ければ `rbw sync` で更新）、暗号文のパスキーを10分間メモリに置き、
    そのサイトの分だけ rbw-agent に復号させる。
 3. 復号した鍵で署名する。署名の回数は Bitwarden のパスキーと同じく常に 0 なので、ログインでは保管庫に何も書き戻さない。
@@ -42,7 +46,8 @@ Chrome では、Google パスワード マネージャーが出てきたら「�
   ```
   仮想キーは systemd の `fido_id` が FIDO のデバイスと判定するので、ログイン中の人が使え、
   snapd も Snap のブラウザ（Firefox）に `u2f-devices` インタフェースで通す。
-- ビルド用の Rust。sudo なしなら例えば
+- ビルドに要るもの: GTK 4 と libadwaita の開発用ファイル（`sudo apt install libgtk-4-dev libadwaita-1-dev`）と Rust。
+  Rust は sudo なしなら例えば
   `RUSTUP_HOME=~/.local/share/rustup CARGO_HOME=~/.local/share/cargo sh rustup-init.sh --no-modify-path --profile minimal`
   （`install.sh` はそこの cargo も見つける）。
 

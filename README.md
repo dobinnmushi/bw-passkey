@@ -18,7 +18,9 @@ browser / app ──CTAP2 over USB HID──▶ bw-passkey (uhid virtual key, bu
 - Built on [soft-fido2](https://github.com/pando85/soft-fido2) (CTAP 2.x, uhid transport) and
   [rbw](https://github.com/doy/rbw). Companion of [bw-autotype](https://github.com/dobinnmushi/bw-autotype)
   (typing passwords on GNOME/Wayland), but independent of it.
-- Notifications follow `LANG` (Japanese or English).
+- **Choose** among several accounts for the same site in its own window (item, user, display name; the last
+  choice comes first), instead of the browser's name-only list.
+- Notifications and the window follow `LANG` (Japanese or English).
 
 Tested on Ubuntu 26.04 (GNOME 50 / Wayland) with Firefox (Snap) and Google Chrome, signing in and creating
 passkeys on real sites. In Chrome, choose "use a different device / security key" when Google Password Manager
@@ -27,7 +29,10 @@ offers itself, or turn off its passkey offers.
 ## How it works
 1. When a site asks for a passkey, the browser asks the key for user verification: bw-passkey shows a
    notification and waits for your fingerprint. If that fails, it locks the vault and asks for the master
-   password (never something weaker). One verification covers the following request for the same site.
+   password (never something weaker); if the vault is locked, unlocking it is the verification. One verification
+   covers the following request for the same site.
+   If the site does not name an account and the vault has several passkeys for it, bw-passkey opens its own
+   window to choose one (`bw-passkey --choose`) and gives the browser only that one.
 2. It fetches the vault with rbw's access token (`/sync`; refreshed with `rbw sync` when expired), keeps the
    encrypted passkeys in memory for 10 minutes, and asks rbw-agent to decrypt the ones for that site.
 3. It signs with the decrypted key. The signature counter is always 0, like Bitwarden's own passkeys, so
@@ -47,7 +52,8 @@ offers itself, or turn off its passkey offers.
   ```
   systemd's `fido_id` recognizes the virtual key as a FIDO device, which gives your session access to it and
   lets snapd pass it to Snap browsers (Firefox) through their `u2f-devices` interface.
-- Rust to build it, e.g. rustup without sudo:
+- To build: GTK 4 and libadwaita development files (`sudo apt install libgtk-4-dev libadwaita-1-dev`) and Rust,
+  e.g. rustup without sudo:
   `RUSTUP_HOME=~/.local/share/rustup CARGO_HOME=~/.local/share/cargo sh rustup-init.sh --no-modify-path --profile minimal`
   (`install.sh` finds cargo there).
 

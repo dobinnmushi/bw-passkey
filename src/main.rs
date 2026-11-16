@@ -9,10 +9,12 @@
 //!   vault.rs   保管庫からパスキーを集める（rbw のトークンで /sync、復号は rbw-agent）
 //!   agent.rs   rbw-agent に復号を頼む
 //!   verify.rs  本人確認（指紋 → だめならマスターパスワード）
+//!   choose.rs  同じサイトのパスキーが複数あるとき選ぶ画面（bw-passkey --choose）
 
 #[macro_use]
 mod i18n;
 mod agent;
+mod choose;
 mod hid;
 mod verify;
 mod vault;
@@ -24,7 +26,9 @@ use soft_fido2::{
     SoftwareCredentialKeyProvider, UpResult, User, UvResult,
 };
 use soft_fido2_ctap::{CredentialKey, SecBytes};
+use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// この仮想キーの AAGUID（認証器の種類を表す番号。bw-passkey 用に作った乱数）
 const AAGUID: [u8; 16] = [
@@ -59,9 +63,56 @@ impl CredentialKeyProvider for Es256Only {
     }
 }
 
+/// 選んだ結果を、同じサイトへの続く問い合わせに使い回す時間（ブラウザは同じ問い合わせを続けて送ることがある）
+const CHOICE_REUSE: Duration = Duration::from_secs(20);
+
 struct Callbacks {
     vault: Mutex<vault::Vault>,
     verifier: verify::Verifier,
+    /// 直前に選んだもの（時刻, サイト, credentialId）
+    last_choice: Mutex<Option<(Instant, String, Vec<u8>)>>,
+    /// サイトごとに前回選んだ credentialId（選ぶ画面で先頭に置く。プロセスが動いている間だけ覚える）
+    preferred: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+impl Callbacks {
+    /// 同じサイトのパスキーが複数あるとき、1件に絞る（直前に選んでいればそれ、なければ選ぶ画面を出す）。
+    /// 閉じられたら空にする
+    fn choose(&self, rp_id: &str, mut found: Vec<(vault::Passkey, String)>) -> Vec<Credential> {
+        if let Some((t, rp, id)) = self.last_choice.lock().unwrap().as_ref()
+            && t.elapsed() < CHOICE_REUSE
+            && rp == rp_id
+            && let Some(p) = found.iter().find(|(p, _)| &p.credential_id == id)
+        {
+            return vec![to_credential(&p.0)];
+        }
+        if let Some(id) = self.preferred.lock().unwrap().get(rp_id)
+            && let Some(i) = found.iter().position(|(p, _)| &p.credential_id == id)
+        {
+            let first = found.remove(i);
+            found.insert(0, first);
+        }
+        let choices: Vec<choose::Choice> = found
+            .iter()
+            .map(|(p, item)| choose::Choice {
+                title: item.clone(),
+                user: p.user_name.clone().unwrap_or_default(),
+                detail: p.user_display_name.clone().filter(|d| Some(d) != p.user_name.as_ref()).unwrap_or_default(),
+            })
+            .collect();
+        match choose::ask(rp_id, &choices) {
+            Some(i) => {
+                let id = found[i].0.credential_id.clone();
+                *self.last_choice.lock().unwrap() = Some((Instant::now(), rp_id.to_owned(), id.clone()));
+                self.preferred.lock().unwrap().insert(rp_id.to_owned(), id);
+                vec![to_credential(&found[i].0)]
+            }
+            None => {
+                log::info!("{rp_id}: choice cancelled");
+                Vec::new()
+            }
+        }
+    }
 }
 
 fn to_credential(p: &vault::Passkey) -> Credential {
@@ -160,19 +211,24 @@ impl AuthenticatorCallbacks for Callbacks {
             self.verifier.notify(&tr!("保管庫からパスキーを読めませんでした: {e}", "Could not read passkeys from the vault: {e}"));
             soft_fido2::Error::Other
         })?;
-        let mut out = Vec::new();
+        let mut matched = Vec::new();
         for enc in found {
             match enc.decrypt() {
-                Ok(p) if user_id.is_none_or(|u| u == p.user_handle.as_slice()) => out.push(to_credential(&p)),
+                Ok(p) if user_id.is_none_or(|u| u == p.user_handle.as_slice()) => matched.push((p, enc.item_name.clone())),
                 Ok(_) => {}
                 Err(e) => log::warn!("could not decrypt a passkey ({}): {e}", enc.item_name),
             }
         }
-        log::info!("{rp_id}: {} passkey(s)", out.len());
-        if out.is_empty() {
+        log::info!("{rp_id}: {} passkey(s)", matched.len());
+        if matched.is_empty() {
             self.verifier.notify(&tr!("保管庫に {rp_id} のパスキーがありません", "No passkey for {rp_id} in the vault"));
         }
-        Ok(out)
+        drop(vault);
+        // 複数あれば、ブラウザに選ばせず、ここで1件に絞る（ブラウザの選ぶ画面は名前でしか区別できないため）
+        if matched.len() > 1 {
+            return Ok(self.choose(rp_id, matched));
+        }
+        Ok(matched.iter().map(|(p, _)| to_credential(p)).collect())
     }
 
     fn enumerate_rps(&self) -> Result<Vec<(String, Option<String>, usize)>> {
@@ -222,11 +278,18 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .init();
-    if std::env::args().nth(1).as_deref() == Some("--list") {
-        std::process::exit(list());
+    match std::env::args().nth(1).as_deref() {
+        Some("--list") => std::process::exit(list()),
+        Some("--choose") => std::process::exit(choose::run()),
+        _ => {}
     }
 
-    let callbacks = Callbacks { vault: Mutex::new(vault::Vault::new()), verifier: verify::Verifier::new() };
+    let callbacks = Callbacks {
+        vault: Mutex::new(vault::Vault::new()),
+        verifier: verify::Verifier::new(),
+        last_choice: Mutex::new(None),
+        preferred: Mutex::new(HashMap::new()),
+    };
     let options = AuthenticatorOptions::new()
         .with_resident_keys(true)
         .with_user_presence(true)
