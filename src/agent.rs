@@ -40,11 +40,11 @@ fn request(action: Value) -> Result<Value, String> {
         .filter_map(|k| std::env::var(k).ok().map(|v| [STANDARD.encode(k), STANDARD.encode(v)]))
         .collect();
     let msg = json!({"tty": null, "environment": {"tty": null, "env_vars": env_vars}, "action": action});
-    let mut sock = UnixStream::connect(socket_path()).map_err(|e| format!("rbw-agent に接続できません: {e}"))?;
+    let mut sock = UnixStream::connect(socket_path()).map_err(|e| tr!("rbw-agent に接続できません: {e}", "cannot connect to rbw-agent: {e}"))?;
     sock.write_all(format!("{msg}\n").as_bytes()).map_err(|e| e.to_string())?;
     let mut line = String::new();
     BufReader::new(&sock).read_line(&mut line).map_err(|e| e.to_string())?;
-    serde_json::from_str(&line).map_err(|e| format!("rbw-agent の答えを読めません: {e}"))
+    serde_json::from_str(&line).map_err(|e| format!("cannot read the answer of rbw-agent: {e}"))
 }
 
 /// 暗号文を平文にする。entry_key は項目ごとの鍵（暗号文のまま）、org_id は組織の項目のとき。
@@ -56,9 +56,9 @@ pub fn decrypt(cipherstring: &str, entry_key: Option<&str>, org_id: Option<&str>
         "org_id": org_id,
     }))?;
     match res.get("type").and_then(Value::as_str) {
-        Some("Decrypt") => res["plaintext"].as_str().map(str::to_owned).ok_or_else(|| "平文がありません".into()),
-        Some("Error") => Err(res["error"].as_str().unwrap_or("不明なエラー").to_owned()),
-        _ => Err(format!("想定外の答え: {res}")),
+        Some("Decrypt") => res["plaintext"].as_str().map(str::to_owned).ok_or_else(|| "no plaintext in the answer".into()),
+        Some("Error") => Err(res["error"].as_str().unwrap_or("unknown error").to_owned()),
+        _ => Err(format!("unexpected answer: {res}")),
     }
 }
 
@@ -66,8 +66,8 @@ pub fn decrypt(cipherstring: &str, entry_key: Option<&str>, org_id: Option<&str>
 pub fn encrypt(plaintext: &str, org_id: Option<&str>) -> Result<String, String> {
     let res = request(json!({"type": "Encrypt", "plaintext": plaintext, "org_id": org_id}))?;
     match res.get("type").and_then(Value::as_str) {
-        Some("Encrypt") => res["cipherstring"].as_str().map(str::to_owned).ok_or_else(|| "暗号文がありません".into()),
-        Some("Error") => Err(res["error"].as_str().unwrap_or("不明なエラー").to_owned()),
-        _ => Err(format!("想定外の答え: {res}")),
+        Some("Encrypt") => res["cipherstring"].as_str().map(str::to_owned).ok_or_else(|| "no cipherstring in the answer".into()),
+        Some("Error") => Err(res["error"].as_str().unwrap_or("unknown error").to_owned()),
+        _ => Err(format!("unexpected answer: {res}")),
     }
 }

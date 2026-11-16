@@ -18,7 +18,7 @@ const ERR_INVALID_CMD: u8 = 0x01;
 
 pub fn run<C: AuthenticatorCallbacks, K: CredentialKeyProvider + Send + 'static>(auth: &mut Authenticator<C, K>) -> soft_fido2::Result<()> {
     let uhid = Uhid::open()?;
-    log::info!("仮想セキュリティキーを用意しました（uhid）");
+    log::info!("virtual security key ready (uhid)");
 
     let mut current_channel: u32 = 0xffff_ffff;
     let mut next_channel_id: u32 = 1;
@@ -42,14 +42,14 @@ pub fn run<C: AuthenticatorCallbacks, K: CredentialKeyProvider + Send + 'static>
                 let received: usize = pending.iter().map(|p| p.payload().len()).sum();
                 if received >= total {
                     if let Err(e) = process(auth, &uhid, &pending, &mut next_channel_id) {
-                        log::warn!("要求を処理できませんでした: {e:?}");
+                        log::warn!("could not process a request: {e:?}");
                     }
                     pending.clear();
                 }
             }
             Ok(_) => std::thread::sleep(Duration::from_millis(10)),
             Err(e) => {
-                log::warn!("uhid の読み込みに失敗: {e:?}");
+                log::warn!("uhid read failed: {e:?}");
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
@@ -83,11 +83,11 @@ fn process<C: AuthenticatorCallbacks, K: CredentialKeyProvider + Send + 'static>
                 done.store(true, Ordering::Relaxed);
                 r
             });
-            log::debug!("CTAP {:02x?} → 結果 {:02x?}", message.data.first(), response.first());
+            log::debug!("CTAP {:02x?} -> status {:02x?}", message.data.first(), response.first());
             let body = match result {
                 Ok(_) => response,
                 Err(e) => {
-                    log::warn!("CTAP の命令 {:02x?} が失敗: {e:?}", message.data.first());
+                    log::warn!("CTAP command {:02x?} failed: {e:?}", message.data.first());
                     vec![0x01]
                 }
             };

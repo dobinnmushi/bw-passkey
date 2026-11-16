@@ -10,6 +10,8 @@
 //!   agent.rs   rbw-agent に復号を頼む
 //!   verify.rs  本人確認（指紋 → だめならマスターパスワード）
 
+#[macro_use]
+mod i18n;
 mod agent;
 mod hid;
 mod verify;
@@ -93,11 +95,11 @@ impl AuthenticatorCallbacks for Callbacks {
     }
 
     fn write_credential(&self, cred: &CredentialRef) -> Result<()> {
-        log::debug!("作成: {} alg={} 鍵 {} バイト", cred.rp_id, cred.alg, cred.key.material.as_slice().len());
+        log::debug!("create: {} alg={} key {} bytes", cred.rp_id, cred.alg, cred.key.material.as_slice().len());
         // 新しいパスキーの作成（force_resident_keys なので必ずここを通る）。保存に失敗したらサイトにもエラーを返す
         let key = cred.key.material.as_slice();
         if *cred.alg != ALG_ES256 || key.len() != 32 {
-            self.verifier.notify("このキーでは、P-256 の ECDSA 以外のパスキーは作れません");
+            self.verifier.notify(&tr!("このキーでは、P-256 の ECDSA 以外のパスキーは作れません", "This key can only create P-256 ECDSA passkeys"));
             return Err(soft_fido2::Error::Other);
         }
         let mut private_key = [0u8; 32];
@@ -113,20 +115,20 @@ impl AuthenticatorCallbacks for Callbacks {
         };
         match self.vault.lock().unwrap().save_new(&new) {
             Ok(name) => {
-                log::info!("{}: パスキーを作って保管庫に保存しました", cred.rp_id);
-                self.verifier.notify(&format!("パスキーを作って保管庫に保存しました: {name}"));
+                log::info!("{}: created a passkey and saved it to the vault", cred.rp_id);
+                self.verifier.notify(&tr!("パスキーを作って保管庫に保存しました: {name}", "Created a passkey and saved it to the vault: {name}"));
                 Ok(())
             }
             Err(e) => {
-                log::warn!("{}: パスキーを保存できません: {e}", cred.rp_id);
-                self.verifier.notify(&format!("パスキーを保管庫に保存できませんでした: {e}"));
+                log::warn!("{}: could not save the passkey: {e}", cred.rp_id);
+                self.verifier.notify(&tr!("パスキーを保管庫に保存できませんでした: {e}", "Could not save the passkey to the vault: {e}"));
                 Err(soft_fido2::Error::Other)
             }
         }
     }
 
     fn read_credential(&self, cred_id: &[u8]) -> Result<Option<Credential>> {
-        log::debug!("ID で検索（{} バイト）", cred_id.len());
+        log::debug!("find by id ({} bytes)", cred_id.len());
         let mut vault = self.vault.lock().unwrap();
         let all = vault.all().map_err(|e| {
             log::warn!("{e}");
@@ -138,7 +140,7 @@ impl AuthenticatorCallbacks for Callbacks {
                 return match enc.decrypt() {
                     Ok(p) => Ok(Some(to_credential(&p))),
                     Err(e) => {
-                        log::warn!("パスキーを復号できません（{}）: {e}", enc.item_name);
+                        log::warn!("could not decrypt a passkey ({}): {e}", enc.item_name);
                         Ok(None)
                     }
                 };
@@ -155,7 +157,7 @@ impl AuthenticatorCallbacks for Callbacks {
         let mut vault = self.vault.lock().unwrap();
         let found = vault.find(rp_id).map_err(|e| {
             log::warn!("{e}");
-            self.verifier.notify(&format!("保管庫からパスキーを読めませんでした: {e}"));
+            self.verifier.notify(&tr!("保管庫からパスキーを読めませんでした: {e}", "Could not read passkeys from the vault: {e}"));
             soft_fido2::Error::Other
         })?;
         let mut out = Vec::new();
@@ -163,12 +165,12 @@ impl AuthenticatorCallbacks for Callbacks {
             match enc.decrypt() {
                 Ok(p) if user_id.is_none_or(|u| u == p.user_handle.as_slice()) => out.push(to_credential(&p)),
                 Ok(_) => {}
-                Err(e) => log::warn!("パスキーを復号できません（{}）: {e}", enc.item_name),
+                Err(e) => log::warn!("could not decrypt a passkey ({}): {e}", enc.item_name),
             }
         }
-        log::info!("{rp_id}: パスキー {} 件", out.len());
+        log::info!("{rp_id}: {} passkey(s)", out.len());
         if out.is_empty() {
-            self.verifier.notify(&format!("保管庫に {rp_id} のパスキーがありません"));
+            self.verifier.notify(&tr!("保管庫に {rp_id} のパスキーがありません", "No passkey for {rp_id} in the vault"));
         }
         Ok(out)
     }
@@ -204,15 +206,15 @@ fn list() -> i32 {
     let mut bad = 0;
     for enc in &all {
         match enc.decrypt() {
-            Ok(p) => println!("{}\t{}\t{}\t鍵OK{}", enc.item_name, p.rp_id, p.user_name.as_deref().unwrap_or(""),
-                              if p.counter > 0 { format!("（カウンタ {}）", p.counter) } else { String::new() }),
+            Ok(p) => println!("{}\t{}\t{}\t{}{}", enc.item_name, p.rp_id, p.user_name.as_deref().unwrap_or(""), tr!("鍵OK", "key OK"),
+                              if p.counter > 0 { tr!("（カウンタ {}）", " (counter {})", p.counter) } else { String::new() }),
             Err(e) => {
                 bad += 1;
-                println!("{}\t{}\t-\t読めない: {e}", enc.item_name, enc.rp_id);
+                println!("{}\t{}\t-\t{}", enc.item_name, enc.rp_id, tr!("読めない: {e}", "unreadable: {e}"));
             }
         }
     }
-    println!("合計 {} 件（読めないもの {bad} 件）", all.len());
+    println!("{}", tr!("合計 {} 件（読めないもの {bad} 件）", "{} in total ({bad} unreadable)", all.len()));
     i32::from(bad > 0)
 }
 
@@ -256,12 +258,12 @@ fn main() {
     let mut auth = match Authenticator::with_config_and_key_provider(callbacks, config, Es256Only(SoftwareCredentialKeyProvider)) {
         Ok(a) => a,
         Err(e) => {
-            log::error!("認証器を作れません: {e:?}");
+            log::error!("could not create the authenticator: {e:?}");
             std::process::exit(1);
         }
     };
     if let Err(e) = hid::run(&mut auth) {
-        log::error!("仮想セキュリティキーを動かせません: {e:?}（/dev/uhid の権限を確かめてください）");
+        log::error!("could not run the virtual security key: {e:?} (check write access to /dev/uhid)");
         std::process::exit(1);
     }
 }

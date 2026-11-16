@@ -3,7 +3,8 @@ name = "bw-passkey"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-description = "Virtual FIDO2 security key backed by the passkeys in your Bitwarden vault (via rbw)"
+description = "Virtual FIDO2 security key that uses and creates the passkeys in your Bitwarden vault (via rbw)"
+repository = "https://github.com/dobinnmushi/bw-passkey"
 
 [dependencies]
 soft-fido2 = { version = "0.19", default-features = false, features = ["std"] }

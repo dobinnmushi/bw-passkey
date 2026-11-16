@@ -108,7 +108,7 @@ fn api_url(config: &Value) -> String {
 
 /// rbw の DB（~/.cache/rbw/<サーバー>:<メールアドレス>.json）からアクセストークンを読む
 fn access_token(config: &Value) -> Result<String, String> {
-    let email = config["email"].as_str().ok_or("rbw にメールアドレスが設定されていません")?;
+    let email = config["email"].as_str().ok_or_else(|| tr!("rbw にメールアドレスが設定されていません", "rbw has no email configured"))?;
     let dir = xdg("XDG_CACHE_HOME", ".cache").join(profile());
     let suffix = format!(":{email}.json");
     for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
@@ -116,10 +116,10 @@ fn access_token(config: &Value) -> Result<String, String> {
         if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)) {
             let db: Value = serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
-            return db["access_token"].as_str().map(str::to_owned).ok_or_else(|| "rbw にログインしていません".into());
+            return db["access_token"].as_str().map(str::to_owned).ok_or_else(|| tr!("rbw にログインしていません", "rbw is not logged in"));
         }
     }
-    Err("rbw の DB が見つかりません（rbw login を済ませてください）".into())
+    Err(tr!("rbw の DB が見つかりません（rbw login を済ませてください）", "rbw database not found (run rbw login first)"))
 }
 
 fn rbw(args: &[&str]) -> bool {
@@ -131,7 +131,7 @@ pub fn ensure_unlocked() -> Result<(), String> {
     if rbw(&["unlocked"]) || rbw(&["unlock"]) {
         Ok(())
     } else {
-        Err("保管庫を開けませんでした".into())
+        Err(tr!("保管庫を開けませんでした", "Could not unlock the vault"))
     }
 }
 
@@ -160,7 +160,7 @@ fn api_call(config: &Value, method: &str, path: &str, body: Option<&Value>) -> R
     let res = match call(&access_token(config)?) {
         Err(ureq::Error::Status(401, _)) => {
             if !rbw(&["sync"]) {
-                return Err("rbw sync に失敗しました".into());
+                return Err(tr!("rbw sync に失敗しました", "rbw sync failed"));
             }
             call(&access_token(config)?)
         }
@@ -210,7 +210,7 @@ fn parse_credential_id(s: &str) -> Result<Vec<u8>, String> {
     }
     let hex: String = s.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 {
-        return Err("credentialId の形式が不正です".into());
+        return Err("invalid credentialId".into());
     }
     (0..16)
         .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|e| e.to_string()))
@@ -247,11 +247,11 @@ impl Vault {
                         org_id: org_id.clone(),
                         fields: c.clone(),
                     }),
-                    Err(e) => log::warn!("パスキーの rpId を復号できません（{item_name}）: {e}"),
+                    Err(e) => log::warn!("could not decrypt the rpId of a passkey ({item_name}): {e}"),
                 }
             }
         }
-        log::info!("保管庫のパスキー: {} 件", found.len());
+        log::info!("passkeys in the vault: {}", found.len());
         self.cache = found;
         self.fetched = Some(Instant::now());
         Ok(())
@@ -283,8 +283,8 @@ impl Vault {
         let config = rbw_config()?;
         let enc = |text: &str| agent::encrypt(text, None);
         let enc_opt = |text: &Option<String>| text.as_deref().map(enc).transpose();
-        let secret = p256::SecretKey::from_slice(&p.private_key).map_err(|e| format!("秘密鍵が不正です: {e}"))?;
-        let der = secret.to_pkcs8_der().map_err(|e| format!("秘密鍵を書き出せません: {e}"))?;
+        let secret = p256::SecretKey::from_slice(&p.private_key).map_err(|e| format!("invalid private key: {e}"))?;
+        let der = secret.to_pkcs8_der().map_err(|e| format!("cannot encode the private key: {e}"))?;
         let name = p.rp_name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| p.rp_id.clone());
         let credential = json!({
             "credentialId": enc(&format!("b64.{}", URL_SAFE_NO_PAD.encode(&p.credential_id)))?,
@@ -339,7 +339,7 @@ impl EncPasskey {
 
     /// credentialId だけ復号する（ID で探すとき、秘密鍵まで復号しないため）
     pub fn credential_id(&self) -> Result<Vec<u8>, String> {
-        parse_credential_id(&self.dec("credentialId")?.ok_or("credentialId がありません")?)
+        parse_credential_id(&self.dec("credentialId")?.ok_or("no credentialId")?)
     }
 
     /// 秘密鍵まで含めて復号する
@@ -347,14 +347,14 @@ impl EncPasskey {
         let algo = self.dec("keyAlgorithm")?.unwrap_or_default();
         let curve = self.dec("keyCurve")?.unwrap_or_default();
         if algo != "ECDSA" || curve != "P-256" {
-            return Err(format!("未対応の鍵です（{algo} {curve}）"));
+            return Err(format!("unsupported key ({algo} {curve})"));
         }
-        let der = decode_b64url(&self.dec("keyValue")?.ok_or("keyValue がありません")?)?;
-        let secret = p256::SecretKey::from_pkcs8_der(&der).map_err(|e| format!("秘密鍵を読めません: {e}"))?;
+        let der = decode_b64url(&self.dec("keyValue")?.ok_or("no keyValue")?)?;
+        let secret = p256::SecretKey::from_pkcs8_der(&der).map_err(|e| format!("cannot read the private key: {e}"))?;
         let mut private_key = [0u8; 32];
         private_key.copy_from_slice(&secret.to_bytes());
         Ok(Passkey {
-            credential_id: parse_credential_id(&self.dec("credentialId")?.ok_or("credentialId がありません")?)?,
+            credential_id: parse_credential_id(&self.dec("credentialId")?.ok_or("no credentialId")?)?,
             rp_id: self.rp_id.clone(),
             rp_name: self.dec("rpName")?,
             user_handle: decode_b64url(&self.dec("userHandle")?.unwrap_or_default())?,

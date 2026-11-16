@@ -22,7 +22,8 @@ fn notify(body: &str, replace: Option<&str>) -> Option<String> {
     if let Some(id) = replace {
         cmd.args(["-r", id]);
     }
-    let out = cmd.args(["Bitwarden パスキー", body]).stderr(Stdio::null()).output().ok()?;
+    let title = tr!("Bitwarden パスキー", "Bitwarden passkey");
+    let out = cmd.args([title.as_str(), body]).stderr(Stdio::null()).output().ok()?;
     let id = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     (!id.is_empty()).then_some(id)
 }
@@ -41,7 +42,7 @@ fn close_notification(id: Option<String>) {
 
 fn fingerprint(rp_id: &str) -> bool {
     // ログインか作成かは、ブラウザの問い合わせ方（UV の許可を先にもらう）からは区別できないので中立の文言にする
-    let mut nid = notify(&format!("{rp_id} でパスキーを使います。指紋センサーに触れてください"), None);
+    let mut nid = notify(&tr!("{rp_id} でパスキーを使います。指紋センサーに触れてください", "Using a passkey for {rp_id}. Touch the fingerprint sensor"), None);
     let mut ok = false;
     for left in (0..FINGER_TRIES).rev() {
         let out = Command::new("timeout")
@@ -55,7 +56,7 @@ fn fingerprint(rp_id: &str) -> bool {
             break;
         }
         if text.contains("verify-no-match") && left > 0 {
-            nid = notify(&format!("指紋が一致しません。もう一度触れてください（残り {left} 回）"), nid.as_deref())
+            nid = notify(&tr!("指紋が一致しません。もう一度触れてください（残り {left} 回）", "No match. Touch the sensor again ({left} left)"), nid.as_deref())
                 .or(nid);
             continue;
         }
@@ -66,7 +67,7 @@ fn fingerprint(rp_id: &str) -> bool {
 }
 
 fn master_password() -> bool {
-    let nid = notify("指紋を確認できなかったため、マスターパスワードで確認します", None);
+    let nid = notify(&tr!("指紋を確認できなかったため、マスターパスワードで確認します", "Fingerprint not verified. Asking for the master password instead"), None);
     let _ = Command::new("rbw").arg("lock").status();
     let ok = Command::new("rbw").arg("unlock").status().is_ok_and(|s| s.success());
     close_notification(nid);
@@ -81,16 +82,16 @@ impl Verifier {
     /// 本人確認（UV）。通れば true
     pub fn verify(&self, rp_id: &str) -> bool {
         let ok = if fingerprint(rp_id) {
-            log::info!("本人確認: 指紋で通過（{rp_id}）");
+            log::info!("verification: fingerprint ok ({rp_id})");
             true
         } else {
-            log::info!("本人確認: 指紋で確認できず、マスターパスワードへ（{rp_id}）");
+            log::info!("verification: fingerprint failed, asking for the master password ({rp_id})");
             master_password()
         };
         if ok {
             *self.last.lock().unwrap() = Some((Instant::now(), rp_id.to_owned()));
         } else {
-            log::info!("本人確認: 通らず（{rp_id}）");
+            log::info!("verification: denied ({rp_id})");
         }
         ok
     }
