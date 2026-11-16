@@ -24,6 +24,18 @@
 Ubuntu 26.04（GNOME 50 / Wayland）の Firefox（Snap 版）と Google Chrome で、実際のサイトでのログインと作成を試している。
 Chrome では、Google パスワード マネージャーが出てきたら「別のデバイス・セキュリティ キー」を選ぶか、その提案を切る。
 
+## 既存の手段との違い
+| 手段 | 拡張の外で、Bitwarden の保管庫のパスキーを使えるか | 備考 |
+|---|---|---|
+| Bitwarden のブラウザ拡張 | × | 拡張が WebAuthn を横取りできるブラウザの中だけ。ブラウザ自身の「セキュリティキーを使う」画面やアプリには答えられず、Linux では指紋での解除がデスクトップ版アプリ経由で不安定なことが多い。 |
+| Bitwarden のデスクトップ版アプリ | × | パスキーへの対応は[開発中](https://community.bitwarden.com/t/desktop-app-auto-type-windows-macos-linux/158)で、ロードマップにあるのは Windows と macOS。 |
+| 本物のセキュリティキー（YubiKey など） | × | どこでも使えるが、鍵はその機器の中にあり、保管庫に入らないので同期しない。 |
+| ほかのソフトウェアの FIDO2 キー（[passless](https://github.com/pando85/passless) など） | × | 仮想のキーという考え方は同じ（bw-passkey は passless の部品 soft-fido2 を使っている）が、鍵は pass・TPM・ファイルに置き、Bitwarden には置かない。 |
+| [Credentials for Linux](https://github.com/linux-credentials)（credentialsd） | × | Linux のパスキーの仕組みとして開発中。ブラウザとの連携は試験的。 |
+
+bw-passkey は、Bitwarden にすでにあるパスキー（公式のアプリで作ったものを含む）をそのまま使い、新しいパスキーもそこへ保存する。
+そのため、ほかの機器への同期もそのまま続き、USB のセキュリティキーが使える場所ならどこでも使える。
+
 ## 仕組み
 1. サイトがパスキーを求めると、ブラウザがキーに本人確認を頼む。bw-passkey は通知を出して指紋を待つ。
    だめなら保管庫をロックし直してマスターパスワードを聞く（それより弱い経路にはしない）。保管庫がロック中なら、開くこと自体を本人確認とする。

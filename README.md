@@ -26,6 +26,18 @@ Tested on Ubuntu 26.04 (GNOME 50 / Wayland) with Firefox (Snap) and Google Chrom
 passkeys on real sites. In Chrome, choose "use a different device / security key" when Google Password Manager
 offers itself, or turn off its passkey offers.
 
+## How it compares
+| Option | Passkeys from the Bitwarden vault outside the extension | Notes |
+|---|---|---|
+| Bitwarden browser extension | – | Works in the browser where the extension intercepts WebAuthn. It can't answer the browser's own "use a security key" prompt or apps, and on Linux its fingerprint unlock goes through the desktop app and is often unreliable. |
+| Bitwarden desktop app | – | Native passkey support is [in progress](https://community.bitwarden.com/t/desktop-app-auto-type-windows-macos-linux/158), with the roadmap mentioning Windows and macOS. |
+| Hardware security key (YubiKey etc.) | – | Works everywhere, but the keys live on the device, not in your vault, so they don't sync. |
+| Other software FIDO2 keys ([passless](https://github.com/pando85/passless) etc.) | – | Same virtual-key idea (bw-passkey is built on passless's library, soft-fido2), but they store keys in pass, a TPM or files, not in Bitwarden. |
+| [Credentials for Linux](https://github.com/linux-credentials) (credentialsd) | – | A system passkey service for Linux, still in development; browser integration is experimental. |
+
+bw-passkey uses the passkeys you already have in Bitwarden (including those created by the official apps) and
+saves new ones there, so they keep syncing to your other devices, and it works wherever a USB security key works.
+
 ## How it works
 1. When a site asks for a passkey, the browser asks the key for user verification: bw-passkey shows a
    notification and waits for your fingerprint. If that fails, it locks the vault and asks for the master
