@@ -20,7 +20,9 @@ browser / app ──CTAP2 over USB HID──▶ bw-passkey (uhid virtual key, bu
   (typing passwords on GNOME/Wayland), but independent of it.
 - Notifications follow `LANG` (Japanese or English).
 
-Tested on Ubuntu 26.04 (GNOME 50 / Wayland) with Firefox (Snap), signing in and creating passkeys on real sites.
+Tested on Ubuntu 26.04 (GNOME 50 / Wayland) with Firefox (Snap) and Google Chrome, signing in and creating
+passkeys on real sites. In Chrome, choose "use a different device / security key" when Google Password Manager
+offers itself, or turn off its passkey offers.
 
 ## How it works
 1. When a site asks for a passkey, the browser asks the key for user verification: bw-passkey shows a

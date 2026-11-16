@@ -19,7 +19,8 @@
   [bw-autotype](https://github.com/dobinnmushi/bw-autotype)（GNOME/Wayland でパスワードを入力する道具）の姉妹品だが、単独で動く。
 - 通知は LANG に合わせて日本語か英語。
 
-Ubuntu 26.04（GNOME 50 / Wayland）の Firefox（Snap 版）で、実際のサイトでのログインと作成を試している。
+Ubuntu 26.04（GNOME 50 / Wayland）の Firefox（Snap 版）と Google Chrome で、実際のサイトでのログインと作成を試している。
+Chrome では、Google パスワード マネージャーが出てきたら「別のデバイス・セキュリティ キー」を選ぶか、その提案を切る。
 
 ## 仕組み
 1. サイトがパスキーを求めると、ブラウザがキーに本人確認を頼む。bw-passkey は通知を出して指紋を待つ。
