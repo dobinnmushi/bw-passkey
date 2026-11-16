@@ -1,4 +1,4 @@
-//! rbw-agent に暗号文の復号を頼む。
+//! rbw-agent に暗号文の復号・平文の暗号化を頼む。
 //!
 //! rbw-agent は UNIX ソケット（$XDG_RUNTIME_DIR/rbw/socket）で、1行の JSON の要求を受けて
 //! 1行の JSON で答える（rbw の src/protocol.rs）。保管庫の鍵は rbw-agent の中にあり、
@@ -57,6 +57,16 @@ pub fn decrypt(cipherstring: &str, entry_key: Option<&str>, org_id: Option<&str>
     }))?;
     match res.get("type").and_then(Value::as_str) {
         Some("Decrypt") => res["plaintext"].as_str().map(str::to_owned).ok_or_else(|| "平文がありません".into()),
+        Some("Error") => Err(res["error"].as_str().unwrap_or("不明なエラー").to_owned()),
+        _ => Err(format!("想定外の答え: {res}")),
+    }
+}
+
+/// 平文を暗号文にする（個人の保管庫の鍵、org_id があればその組織の鍵で）
+pub fn encrypt(plaintext: &str, org_id: Option<&str>) -> Result<String, String> {
+    let res = request(json!({"type": "Encrypt", "plaintext": plaintext, "org_id": org_id}))?;
+    match res.get("type").and_then(Value::as_str) {
+        Some("Encrypt") => res["cipherstring"].as_str().map(str::to_owned).ok_or_else(|| "暗号文がありません".into()),
         Some("Error") => Err(res["error"].as_str().unwrap_or("不明なエラー").to_owned()),
         _ => Err(format!("想定外の答え: {res}")),
     }

@@ -1,8 +1,8 @@
 //! bw-passkey: Bitwarden の保管庫にあるパスキーで答える、仮想の FIDO2 セキュリティキー。
 //!
-//! ブラウザやアプリからは USB のセキュリティキーに見える（uhid）。ログイン（getAssertion）の要求が来たら、
-//! 指紋で本人確認をし、保管庫（rbw）からそのサイトのパスキーを取り出して署名する。
-//! 新しいパスキーの作成（makeCredential）にはまだ対応しない（作成はブラウザ拡張に任せる）。
+//! ブラウザやアプリからは USB のセキュリティキーに見える（uhid）。指紋で本人確認をしたうえで、
+//! - ログイン（getAssertion）: 保管庫（rbw）からそのサイトのパスキーを取り出して署名する。
+//! - 作成（makeCredential）: 作ったパスキーを、保管庫の新しいログイン項目として保存する。
 //!
 //! 構成:
 //!   hid.rs     USB HID（CTAPHID）のやり取り
@@ -17,8 +17,9 @@ mod vault;
 
 use soft_fido2::{
     Authenticator, AuthenticatorCallbacks, AuthenticatorConfig, AuthenticatorOptions, Credential,
-    CredentialBackupState, CredentialRef, CtapCommand, Extensions, RelyingParty, Result, UpResult,
-    User, UvResult,
+    CredentialBackupState, CredentialKeyError, CredentialKeyProvider, CredentialKeyProviderId,
+    CredentialRef, CtapCommand, Extensions, GeneratedCredentialKey, RelyingParty, Result,
+    SoftwareCredentialKeyProvider, UpResult, User, UvResult,
 };
 use soft_fido2_ctap::{CredentialKey, SecBytes};
 use std::sync::Mutex;
@@ -29,6 +30,32 @@ const AAGUID: [u8; 16] = [
 ];
 /// ES256（P-256 の ECDSA）。Bitwarden のパスキーはこれだけ
 const ALG_ES256: i32 = -7;
+
+/// 鍵を作る部品。soft-fido2 の標準（ソフトウェアの鍵）に任せるが、ES256 にしか対応しないと答える。
+/// 設定の algorithms で絞っても、サイトが Ed25519 を先に挙げると soft-fido2 はそれを選ぶため
+/// （make_credential.rs の validate_and_choose_algorithm）、ここで断る
+struct Es256Only(SoftwareCredentialKeyProvider);
+
+impl CredentialKeyProvider for Es256Only {
+    fn provider_id(&self) -> CredentialKeyProviderId {
+        self.0.provider_id()
+    }
+
+    fn supports_algorithm(&self, algorithm: i32) -> bool {
+        algorithm == ALG_ES256
+    }
+
+    fn generate(&self, algorithm: i32) -> std::result::Result<GeneratedCredentialKey, CredentialKeyError> {
+        if algorithm != ALG_ES256 {
+            return Err(CredentialKeyError::UnsupportedAlgorithm);
+        }
+        self.0.generate(algorithm)
+    }
+
+    fn sign(&self, key: &CredentialKey, algorithm: i32, message: &[u8]) -> std::result::Result<Vec<u8>, CredentialKeyError> {
+        self.0.sign(key, algorithm, message)
+    }
+}
 
 struct Callbacks {
     vault: Mutex<vault::Vault>,
@@ -65,23 +92,56 @@ impl AuthenticatorCallbacks for Callbacks {
         Ok(if self.verifier.verify(rp_id) { UvResult::Accepted } else { UvResult::Denied })
     }
 
-    fn write_credential(&self, _cred: &CredentialRef) -> Result<()> {
-        // 作成の命令は受け付けていないのでここには来ないはず。来ても保管庫には書かない
-        self.verifier.notify("このキーでは、新しいパスキーはまだ作れません（ブラウザ拡張で作ってください）");
-        Err(soft_fido2::Error::Other)
+    fn write_credential(&self, cred: &CredentialRef) -> Result<()> {
+        log::debug!("作成: {} alg={} 鍵 {} バイト", cred.rp_id, cred.alg, cred.key.material.as_slice().len());
+        // 新しいパスキーの作成（force_resident_keys なので必ずここを通る）。保存に失敗したらサイトにもエラーを返す
+        let key = cred.key.material.as_slice();
+        if *cred.alg != ALG_ES256 || key.len() != 32 {
+            self.verifier.notify("このキーでは、P-256 の ECDSA 以外のパスキーは作れません");
+            return Err(soft_fido2::Error::Other);
+        }
+        let mut private_key = [0u8; 32];
+        private_key.copy_from_slice(key);
+        let new = vault::NewPasskey {
+            credential_id: cred.id.to_vec(),
+            rp_id: cred.rp_id.to_owned(),
+            rp_name: cred.rp_name.map(str::to_owned),
+            user_handle: cred.user_id.to_vec(),
+            user_name: cred.user_name.map(str::to_owned),
+            user_display_name: cred.user_display_name.map(str::to_owned),
+            private_key,
+        };
+        match self.vault.lock().unwrap().save_new(&new) {
+            Ok(name) => {
+                log::info!("{}: パスキーを作って保管庫に保存しました", cred.rp_id);
+                self.verifier.notify(&format!("パスキーを作って保管庫に保存しました: {name}"));
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("{}: パスキーを保存できません: {e}", cred.rp_id);
+                self.verifier.notify(&format!("パスキーを保管庫に保存できませんでした: {e}"));
+                Err(soft_fido2::Error::Other)
+            }
+        }
     }
 
     fn read_credential(&self, cred_id: &[u8]) -> Result<Option<Credential>> {
+        log::debug!("ID で検索（{} バイト）", cred_id.len());
         let mut vault = self.vault.lock().unwrap();
         let all = vault.all().map_err(|e| {
             log::warn!("{e}");
             soft_fido2::Error::Other
         })?;
+        // ID だけを復号して探し、見つかったものだけ秘密鍵まで復号する
         for enc in all {
-            match enc.decrypt() {
-                Ok(p) if p.credential_id == cred_id => return Ok(Some(to_credential(&p))),
-                Ok(_) => {}
-                Err(e) => log::warn!("パスキーを復号できません（{}）: {e}", enc.item_name),
+            if enc.credential_id().is_ok_and(|id| id == cred_id) {
+                return match enc.decrypt() {
+                    Ok(p) => Ok(Some(to_credential(&p))),
+                    Err(e) => {
+                        log::warn!("パスキーを復号できません（{}）: {e}", enc.item_name);
+                        Ok(None)
+                    }
+                };
             }
         }
         Ok(None)
@@ -174,6 +234,7 @@ fn main() {
     let config = AuthenticatorConfig::builder()
         .aaguid(AAGUID)
         .commands(vec![
+            CtapCommand::MakeCredential,
             CtapCommand::GetInfo,
             CtapCommand::GetAssertion,
             CtapCommand::GetNextAssertion,
@@ -181,12 +242,18 @@ fn main() {
             CtapCommand::Selection,
         ])
         .options(options)
+        // Bitwarden のパスキーは ES256（P-256 の ECDSA）だけ（鍵を作る部品の Es256Only でも断る）
+        .algorithms(vec![ALG_ES256])
         .max_credentials(1000)
         // 署名の回数は常に 0（Bitwarden のパスキーも 0 のまま。保管庫に書き戻さない）
         .constant_sign_count(true)
+        // 作るパスキーは必ず保管庫に保存する（ID に鍵を包んで返す方式は使わない）
+        .force_resident_keys(true)
+        // Bitwarden と同じく「同期されるパスキー」の印（BE・BS）を作成時から立てる
+        .default_credential_backup_state(CredentialBackupState::BackedUp)
         .build();
 
-    let mut auth = match Authenticator::with_config(callbacks, config) {
+    let mut auth = match Authenticator::with_config_and_key_provider(callbacks, config, Es256Only(SoftwareCredentialKeyProvider)) {
         Ok(a) => a,
         Err(e) => {
             log::error!("認証器を作れません: {e:?}");

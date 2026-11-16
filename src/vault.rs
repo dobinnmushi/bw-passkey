@@ -13,8 +13,8 @@
 use crate::agent;
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD};
-use p256::pkcs8::DecodePrivateKey;
-use serde_json::Value;
+use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -45,6 +45,23 @@ pub struct Passkey {
     pub private_key: [u8; 32],
     pub discoverable: bool,
     pub counter: u32,
+}
+
+/// 作ったばかりのパスキー（保管庫に新しい項目として保存する）
+pub struct NewPasskey {
+    pub credential_id: Vec<u8>,
+    pub rp_id: String,
+    pub rp_name: Option<String>,
+    pub user_handle: Vec<u8>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
+    pub private_key: [u8; 32],
+}
+
+impl Drop for NewPasskey {
+    fn drop(&mut self) {
+        self.private_key.fill(0);
+    }
 }
 
 impl Drop for Passkey {
@@ -128,25 +145,54 @@ fn field<'a>(v: &'a Value, name: &str) -> &'a Value {
     }
 }
 
-fn fetch_sync(config: &Value) -> Result<Value, String> {
-    let url = format!("{}/sync", api_url(config));
-    let get = |token: &str| {
-        ureq::get(&url)
+/// Bitwarden の API を呼ぶ。トークンが古ければ（401）、rbw sync でトークンを更新して DB に書かせ、読み直してもう一度
+fn api_call(config: &Value, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+    let url = format!("{}{path}", api_url(config));
+    let call = |token: &str| {
+        let req = ureq::request(method, &url)
             .set("Authorization", &format!("Bearer {token}"))
-            .set("Bitwarden-Client-Version", CLIENT_VERSION)
-            .call()
+            .set("Bitwarden-Client-Version", CLIENT_VERSION);
+        match body {
+            Some(b) => req.send_json(b.clone()),
+            None => req.call(),
+        }
     };
-    match get(&access_token(config)?) {
-        Ok(res) => res.into_json().map_err(|e| e.to_string()),
-        // トークンが古い: rbw sync がトークンを更新して DB に書くので、読み直してもう一度
+    let res = match call(&access_token(config)?) {
         Err(ureq::Error::Status(401, _)) => {
             if !rbw(&["sync"]) {
                 return Err("rbw sync に失敗しました".into());
             }
-            get(&access_token(config)?).map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())
+            call(&access_token(config)?)
         }
+        other => other,
+    };
+    match res {
+        Ok(r) => r.into_json().map_err(|e| e.to_string()),
+        Err(ureq::Error::Status(code, r)) => Err(format!("{method} {path}: {code} {}", r.into_string().unwrap_or_default())),
         Err(e) => Err(e.to_string()),
     }
+}
+
+fn fetch_sync(config: &Value) -> Result<Value, String> {
+    api_call(config, "GET", "/sync", None)
+}
+
+/// 今の UTC の日時を ISO 8601（例: 2026-11-16T06:00:00.000Z）で
+fn iso_now() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let (secs, millis) = (now.as_secs() as i64, now.subsec_millis());
+    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    // 1970-01-01 からの日数を年月日に（Howard Hinnant の civil_from_days）
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{millis:03}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
 fn decode_b64url(s: &str) -> Result<Vec<u8>, String> {
@@ -229,6 +275,51 @@ impl Vault {
         Ok(found)
     }
 
+    /// 新しいパスキーを、保管庫の新しいログイン項目として保存する（Bitwarden の形式。各欄を暗号化して POST /ciphers）。
+    /// 項目ごとの鍵は付けず、個人の保管庫の鍵で暗号化する（rbw-agent が項目ごとの鍵での暗号化に対応しないため）。
+    /// 保存できたら、次に使うとき取り直すよう覚えを捨て、rbw の側も同期させる。項目名を返す
+    pub fn save_new(&mut self, p: &NewPasskey) -> Result<String, String> {
+        ensure_unlocked()?;
+        let config = rbw_config()?;
+        let enc = |text: &str| agent::encrypt(text, None);
+        let enc_opt = |text: &Option<String>| text.as_deref().map(enc).transpose();
+        let secret = p256::SecretKey::from_slice(&p.private_key).map_err(|e| format!("秘密鍵が不正です: {e}"))?;
+        let der = secret.to_pkcs8_der().map_err(|e| format!("秘密鍵を書き出せません: {e}"))?;
+        let name = p.rp_name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| p.rp_id.clone());
+        let credential = json!({
+            "credentialId": enc(&format!("b64.{}", URL_SAFE_NO_PAD.encode(&p.credential_id)))?,
+            "keyType": enc("public-key")?,
+            "keyAlgorithm": enc("ECDSA")?,
+            "keyCurve": enc("P-256")?,
+            "keyValue": enc(&URL_SAFE_NO_PAD.encode(der.as_bytes()))?,
+            "rpId": enc(&p.rp_id)?,
+            "rpName": enc_opt(&p.rp_name)?,
+            "userHandle": enc(&URL_SAFE_NO_PAD.encode(&p.user_handle))?,
+            "userName": enc_opt(&p.user_name)?,
+            "userDisplayName": enc_opt(&p.user_display_name)?,
+            "counter": enc("0")?,
+            "discoverable": enc("true")?,
+            "creationDate": iso_now(),
+        });
+        let cipher = json!({
+            "type": 1,
+            "folderId": null,
+            "name": enc(&name)?,
+            "notes": null,
+            "login": {
+                "username": enc_opt(&p.user_name)?,
+                "password": null,
+                "totp": null,
+                "uris": [{"uri": enc(&format!("https://{}", p.rp_id))?, "match": null}],
+                "fido2Credentials": [credential],
+            },
+        });
+        api_call(&config, "POST", "/ciphers", Some(&cipher))?;
+        self.fetched = None;
+        let _ = Command::new("rbw").arg("sync").spawn().map(|mut c| std::thread::spawn(move || c.wait()));
+        Ok(name)
+    }
+
     /// 全サイトのパスキー（暗号文のまま。資格情報の一覧を求められたとき用）
     pub fn all(&mut self) -> Result<Vec<EncPasskey>, String> {
         if self.stale() {
@@ -244,6 +335,11 @@ impl EncPasskey {
             None => Ok(None),
             Some(enc) => agent::decrypt(enc, self.entry_key.as_deref(), self.org_id.as_deref()).map(Some),
         }
+    }
+
+    /// credentialId だけ復号する（ID で探すとき、秘密鍵まで復号しないため）
+    pub fn credential_id(&self) -> Result<Vec<u8>, String> {
+        parse_credential_id(&self.dec("credentialId")?.ok_or("credentialId がありません")?)
     }
 
     /// 秘密鍵まで含めて復号する
@@ -284,6 +380,13 @@ mod tests {
     #[test]
     fn credential_id_b64() {
         assert_eq!(parse_credential_id("b64.AQID").unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn iso_now_shape() {
+        let t = iso_now();
+        assert_eq!(t.len(), 24);
+        assert!(t.starts_with("20") && t.ends_with('Z'));
     }
 
     #[test]

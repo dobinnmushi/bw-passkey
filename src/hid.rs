@@ -5,7 +5,7 @@
 //! - 時間のかかる要求（指紋を待つ間など）は、100ms ごとに KEEPALIVE を送る（ブラウザが諦めないように）
 //! - チャネル番号の割り当てを 0 と 0xffffffff を避けて回す
 
-use soft_fido2::{Authenticator, AuthenticatorCallbacks, Uhid};
+use soft_fido2::{Authenticator, AuthenticatorCallbacks, CredentialKeyProvider, Uhid};
 use soft_fido2_transport::{Cmd, Message, Packet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -16,7 +16,7 @@ const STATUS_UPNEEDED: u8 = 2;
 /// CTAPHID のエラー: 知らない命令
 const ERR_INVALID_CMD: u8 = 0x01;
 
-pub fn run<C: AuthenticatorCallbacks>(auth: &mut Authenticator<C>) -> soft_fido2::Result<()> {
+pub fn run<C: AuthenticatorCallbacks, K: CredentialKeyProvider + Send + 'static>(auth: &mut Authenticator<C, K>) -> soft_fido2::Result<()> {
     let uhid = Uhid::open()?;
     log::info!("仮想セキュリティキーを用意しました（uhid）");
 
@@ -56,8 +56,8 @@ pub fn run<C: AuthenticatorCallbacks>(auth: &mut Authenticator<C>) -> soft_fido2
     }
 }
 
-fn process<C: AuthenticatorCallbacks>(
-    auth: &mut Authenticator<C>,
+fn process<C: AuthenticatorCallbacks, K: CredentialKeyProvider + Send + 'static>(
+    auth: &mut Authenticator<C, K>,
     uhid: &Uhid,
     packets: &[Packet],
     next_channel_id: &mut u32,
@@ -83,6 +83,7 @@ fn process<C: AuthenticatorCallbacks>(
                 done.store(true, Ordering::Relaxed);
                 r
             });
+            log::debug!("CTAP {:02x?} → 結果 {:02x?}", message.data.first(), response.first());
             let body = match result {
                 Ok(_) => response,
                 Err(e) => {

@@ -40,7 +40,8 @@ fn close_notification(id: Option<String>) {
 }
 
 fn fingerprint(rp_id: &str) -> bool {
-    let mut nid = notify(&format!("{rp_id} にパスキーで入ります。指紋センサーに触れてください"), None);
+    // ログインか作成かは、ブラウザの問い合わせ方（UV の許可を先にもらう）からは区別できないので中立の文言にする
+    let mut nid = notify(&format!("{rp_id} でパスキーを使います。指紋センサーに触れてください"), None);
     let mut ok = false;
     for left in (0..FINGER_TRIES).rev() {
         let out = Command::new("timeout")

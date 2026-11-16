@@ -1,6 +1,6 @@
 # bw-passkey
 
-A virtual FIDO2 security key for Linux that signs with the **passkeys stored in your Bitwarden vault**.
+A virtual FIDO2 security key for Linux that uses and creates the **passkeys in your Bitwarden vault**.
 Browsers and apps see an ordinary USB security key, so passkey sign-in works without the Bitwarden
 browser extension: in Firefox (also the Snap), Chrome and Electron apps.
 
@@ -10,8 +10,9 @@ browser / app ──CTAP2 over USB HID──▶ bw-passkey (uhid virtual key, bu
                                         └ keys: your vault via rbw (sync with rbw's token, decrypt with rbw-agent)
 ```
 
-- **Sign-in only (for now).** It answers getAssertion with passkeys that are already in the vault.
-  Create passkeys with the Bitwarden extension or app as before.
+- **Sign-in and creation.** It signs in with passkeys that are already in the vault, and a passkey created
+  with it is saved to the vault as a new login item (name, username and URI set from the site). It cannot add a
+  passkey to an existing login item yet (rbw-agent cannot encrypt with per-item keys).
 - Built on [soft-fido2](https://github.com/pando85/soft-fido2) (CTAP 2.x, uhid transport).
 - Companion of [bw-autotype](https://github.com/dobinnmushi/bw-autotype), but independent of it.
 
@@ -22,7 +23,10 @@ browser / app ──CTAP2 over USB HID──▶ bw-passkey (uhid virtual key, bu
 2. It fetches the vault with rbw's access token (`/sync`; refreshed with `rbw sync` when expired), keeps the
    encrypted passkeys in memory for 10 minutes, and asks rbw-agent to decrypt the ones for that site.
 3. It signs with the decrypted key. The signature counter is always 0, like Bitwarden's own passkeys, so
-   nothing is written back to the vault.
+   nothing is written back to the vault when you sign in.
+4. When a site creates a passkey, the new key's fields are encrypted by rbw-agent (with your personal vault key)
+   and saved as a new login item with `POST /ciphers` before the site gets its answer, so a failed save also
+   fails the registration. `rbw sync` runs afterwards so rbw sees the new item.
 
 ## Requirements
 - rbw (logged in and unlocked; `rbw unlock` is run when needed), fprintd (optional), notify-send
