@@ -1,5 +1,7 @@
 //! Bitwarden の保管庫からパスキー（login.fido2Credentials）を集める。
 //!
+//! 門（bw-vault。gate.rs）があれば、一覧・秘密鍵・保存をすべて門に頼む。以下は、門がないときの従来の動き。
+//!
 //! rbw はパスキーの欄を読まないので、rbw が持つアクセストークンで保管庫の生のデータ（/sync）を取り、
 //! 暗号文のまま覚えておく。サイトの判定に使う rpId だけは取得時に平文にし、秘密鍵などは使う直前に
 //! rbw-agent で復号する（agent.rs）。
@@ -11,6 +13,7 @@
 //! - Bitwarden が作るパスキーのカウンタは常に 0（使っても書き戻さない）
 
 use crate::agent;
+use crate::gate;
 use base64::Engine as _;
 use base64::engine::general_purpose::{URL_SAFE_NO_PAD, STANDARD};
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey};
@@ -32,6 +35,18 @@ pub struct EncPasskey {
     entry_key: Option<String>,
     org_id: Option<String>,
     fields: Value,
+    /// 門から取ったときの、パスキーの参照とメタ情報（鍵は含まない）
+    gate: Option<(String, Meta)>,
+}
+
+/// パスキーのメタ情報（秘密鍵ではない。選ぶ画面や絞り込みに使う）
+#[derive(Clone)]
+pub struct Meta {
+    pub credential_id: Vec<u8>,
+    pub user_handle: Vec<u8>,
+    pub rp_name: Option<String>,
+    pub user_name: Option<String>,
+    pub user_display_name: Option<String>,
 }
 
 /// 使う直前に復号したパスキー
@@ -128,6 +143,9 @@ fn rbw(args: &[&str]) -> bool {
 
 /// 保管庫が開いていなければ開く（pinentry でマスターパスワードを聞く）
 pub fn ensure_unlocked() -> Result<(), String> {
+    if gate::available() {
+        return Ok(()); // 門が、使われたときに開く
+    }
     if rbw(&["unlocked"]) || rbw(&["unlock"]) {
         Ok(())
     } else {
@@ -222,7 +240,37 @@ impl Vault {
         Vault { cache: Vec::new(), fetched: None }
     }
 
+    /// 門から一覧を取る（門は 10 分は覚えている。force なら、古くなければ取り直さないまま、新しいものを探させる）
+    fn refresh_from_gate(&mut self, force: bool) -> Result<(), String> {
+        let res = gate::request(json!({"type": "PasskeyList", "force": force}))?;
+        let text = |v: &Value, k: &str| v[k].as_str().map(str::to_owned);
+        let mut found = Vec::new();
+        for p in res["passkeys"].as_array().into_iter().flatten() {
+            let meta = Meta {
+                credential_id: parse_credential_id(p["credential_id"].as_str().unwrap_or(""))?,
+                user_handle: decode_b64url(p["user_handle"].as_str().unwrap_or(""))?,
+                rp_name: text(p, "rp_name"),
+                user_name: text(p, "user_name"),
+                user_display_name: text(p, "user_display_name"),
+            };
+            found.push(EncPasskey {
+                item_name: text(p, "item_name").unwrap_or_default(),
+                rp_id: text(p, "rp_id").unwrap_or_default(),
+                entry_key: None,
+                org_id: None,
+                fields: Value::Null,
+                gate: Some((text(p, "ref").unwrap_or_default(), meta)),
+            });
+        }
+        self.cache = found;
+        self.fetched = Some(Instant::now());
+        Ok(())
+    }
+
     fn refresh(&mut self) -> Result<(), String> {
+        if gate::available() {
+            return self.refresh_from_gate(false);
+        }
         ensure_unlocked()?;
         let config = rbw_config()?;
         let sync = fetch_sync(&config)?;
@@ -246,6 +294,7 @@ impl Vault {
                         entry_key: entry_key.clone(),
                         org_id: org_id.clone(),
                         fields: c.clone(),
+                        gate: None,
                     }),
                     Err(e) => log::warn!("could not decrypt the rpId of a passkey ({item_name}): {e}"),
                 }
@@ -258,7 +307,9 @@ impl Vault {
     }
 
     fn stale(&self) -> bool {
-        self.fetched.is_none_or(|t| t.elapsed() > CACHE_TTL)
+        // 門のときは、門が覚えているので、こちらは短い間だけ覚える（新しく登録したパスキーが早く見える）
+        let ttl = if gate::available() { Duration::from_secs(5) } else { CACHE_TTL };
+        self.fetched.is_none_or(|t| t.elapsed() > ttl)
     }
 
     /// rp_id のパスキー（暗号文のまま）。古ければ取り直し、見つからなければもう一度だけ取り直す
@@ -269,7 +320,11 @@ impl Vault {
         let hits = |v: &Vault| v.cache.iter().filter(|p| p.rp_id == rp_id).cloned().collect::<Vec<_>>();
         let mut found = hits(self);
         if found.is_empty() && self.fetched.is_some_and(|t| t.elapsed() > Duration::from_secs(10)) {
-            self.refresh()?;
+            if gate::available() {
+                self.refresh_from_gate(true)?;
+            } else {
+                self.refresh()?;
+            }
             found = hits(self);
         }
         Ok(found)
@@ -279,6 +334,9 @@ impl Vault {
     /// 項目ごとの鍵は付けず、個人の保管庫の鍵で暗号化する（rbw-agent が項目ごとの鍵での暗号化に対応しないため）。
     /// 保存できたら、次に使うとき取り直すよう覚えを捨て、rbw の側も同期させる。項目名を返す
     pub fn save_new(&mut self, p: &NewPasskey) -> Result<String, String> {
+        if gate::available() {
+            return self.save_new_via_gate(p);
+        }
         ensure_unlocked()?;
         let config = rbw_config()?;
         let enc = |text: &str| agent::encrypt(text, None);
@@ -320,6 +378,30 @@ impl Vault {
         Ok(name)
     }
 
+    /// 門に保存を頼む（暗号化・送信・本人確認は門がする）。項目名を返す
+    fn save_new_via_gate(&mut self, p: &NewPasskey) -> Result<String, String> {
+        let secret = p256::SecretKey::from_slice(&p.private_key).map_err(|e| format!("invalid private key: {e}"))?;
+        let der = secret.to_pkcs8_der().map_err(|e| format!("cannot encode the private key: {e}"))?;
+        let name = p.rp_name.clone().filter(|n| !n.is_empty()).unwrap_or_else(|| p.rp_id.clone());
+        let credential = json!({
+            "credentialId": format!("b64.{}", URL_SAFE_NO_PAD.encode(&p.credential_id)),
+            "keyType": "public-key",
+            "keyAlgorithm": "ECDSA",
+            "keyCurve": "P-256",
+            "keyValue": URL_SAFE_NO_PAD.encode(der.as_bytes()),
+            "rpId": p.rp_id,
+            "rpName": p.rp_name,
+            "userHandle": URL_SAFE_NO_PAD.encode(&p.user_handle),
+            "userName": p.user_name,
+            "userDisplayName": p.user_display_name,
+            "counter": "0",
+            "discoverable": "true",
+        });
+        gate::request(json!({"type": "AddEntry", "kind": "passkey", "name": name, "credential": credential}))?;
+        self.fetched = None;
+        Ok(name)
+    }
+
     /// 全サイトのパスキー（暗号文のまま。資格情報の一覧を求められたとき用）
     pub fn all(&mut self) -> Result<Vec<EncPasskey>, String> {
         if self.stale() {
@@ -339,11 +421,56 @@ impl EncPasskey {
 
     /// credentialId だけ復号する（ID で探すとき、秘密鍵まで復号しないため）
     pub fn credential_id(&self) -> Result<Vec<u8>, String> {
+        if let Some((_, m)) = &self.gate {
+            return Ok(m.credential_id.clone());
+        }
         parse_credential_id(&self.dec("credentialId")?.ok_or("no credentialId")?)
+    }
+
+    /// メタ情報だけ（秘密鍵は復号しない）。選ぶ画面や、ユーザーでの絞り込みに使う
+    pub fn meta(&self) -> Result<Meta, String> {
+        if let Some((_, m)) = &self.gate {
+            return Ok(m.clone());
+        }
+        Ok(Meta {
+            credential_id: self.credential_id()?,
+            user_handle: decode_b64url(&self.dec("userHandle")?.unwrap_or_default())?,
+            rp_name: self.dec("rpName")?,
+            user_name: self.dec("userName")?,
+            user_display_name: self.dec("userDisplayName")?,
+        })
+    }
+
+    /// 門から秘密鍵を取る（門が、サイトとユーザー名を出して本人確認をしてから返す）
+    fn decrypt_via_gate(&self, reference: &str, m: &Meta) -> Result<Passkey, String> {
+        let res = gate::request(json!({"type": "PasskeyGet", "ref": reference}))?;
+        let text = |k: &str| res[k].as_str().unwrap_or_default();
+        let (algo, curve) = (text("key_algorithm"), text("key_curve"));
+        if algo != "ECDSA" || curve != "P-256" {
+            return Err(format!("unsupported key ({algo} {curve})"));
+        }
+        let der = decode_b64url(text("key_value"))?;
+        let secret = p256::SecretKey::from_pkcs8_der(&der).map_err(|e| format!("cannot read the private key: {e}"))?;
+        let mut private_key = [0u8; 32];
+        private_key.copy_from_slice(&secret.to_bytes());
+        Ok(Passkey {
+            credential_id: m.credential_id.clone(),
+            rp_id: self.rp_id.clone(),
+            rp_name: m.rp_name.clone(),
+            user_handle: m.user_handle.clone(),
+            user_name: m.user_name.clone(),
+            user_display_name: m.user_display_name.clone(),
+            private_key,
+            discoverable: text("discoverable") != "false",
+            counter: text("counter").parse().unwrap_or(0),
+        })
     }
 
     /// 秘密鍵まで含めて復号する
     pub fn decrypt(&self) -> Result<Passkey, String> {
+        if let Some((reference, m)) = &self.gate {
+            return self.decrypt_via_gate(reference, m);
+        }
         let algo = self.dec("keyAlgorithm")?.unwrap_or_default();
         let curve = self.dec("keyCurve")?.unwrap_or_default();
         if algo != "ECDSA" || curve != "P-256" {
@@ -371,6 +498,9 @@ impl EncPasskey {
 mod tests {
     use super::*;
 
+    /// 環境変数を書き換えるテストは、同時に動かさない
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn credential_id_guid() {
         let id = parse_credential_id("6f158274-aab6-443d-9bcf-8a3f69297c88").unwrap();
@@ -394,5 +524,280 @@ mod tests {
         let v: Value = serde_json::json!({"RpId": "a", "userName": "b"});
         assert_eq!(field(&v, "rpId"), "a");
         assert_eq!(field(&v, "userName"), "b");
+    }
+
+    /// 偽の門（UNIX ソケット）を立てて、門を使う経路（一覧・鍵の取得・保存）を確かめる
+    #[test]
+    fn gate_backend() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+        use std::sync::{Arc, Mutex};
+
+        const DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTjEcVCu-owIHm5qhLE4Qhw76FZU2IQnTQa6J0xWoAfuhRANCAAS5AFVlTAJqFsaRvVi4mQ3nTnIoevSnIMf6FNtzpBFOttl6TrC0uo6PEihHFkD2472oFntw2oIYEs2N8Dgyp86w";
+        let dir = std::env::temp_dir().join(format!("bwpk-gate-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gate.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        // SAFETY: この環境変数を使うテストはこの1つだけ
+        unsafe { std::env::set_var("BWVAULT_GATE_SOCKET", &path) };
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let action = serde_json::from_str::<Value>(&line).unwrap()["action"].clone();
+                seen2.lock().unwrap().push(action.clone());
+                let res = match action["type"].as_str().unwrap() {
+                    "PasskeyList" => json!({"type": "Passkeys", "passkeys": [
+                        {"ref": "c1#0", "item_name": "Example", "rp_id": "example.com", "rp_name": "Example Inc",
+                         "credential_id": "6f158274-aab6-443d-9bcf-8a3f69297c88", "user_handle": "AQID",
+                         "user_name": "me@example.com", "user_display_name": null},
+                        {"ref": "bad#0", "item_name": "Other", "rp_id": "other.example", "rp_name": null,
+                         "credential_id": "b64.BAUG", "user_handle": "", "user_name": null, "user_display_name": null},
+                        {"ref": "rsa#0", "item_name": "Rsa", "rp_id": "rsa.example", "rp_name": null,
+                         "credential_id": "b64.BwgJ", "user_handle": "", "user_name": null, "user_display_name": null}]}),
+                    "PasskeyGet" => match action["ref"].as_str().unwrap() {
+                        "c1#0" => json!({"type": "Passkey", "key_value": DER, "key_algorithm": "ECDSA", "key_curve": "P-256",
+                                         "counter": "0", "discoverable": "true"}),
+                        "rsa#0" => json!({"type": "Passkey", "key_value": DER, "key_algorithm": "RSA", "key_curve": "",
+                                          "counter": "0", "discoverable": "true"}),
+                        _ => json!({"type": "Error", "error": "authorization denied"}),
+                    },
+                    "AddEntry" => json!({"type": "Ack"}),
+                    _ => json!({"type": "Error", "error": "not allowed"}),
+                };
+                writeln!(stream, "{res}").unwrap();
+            }
+        });
+
+        assert!(crate::gate::available());
+        let mut vault = Vault::new();
+        let found = vault.find("example.com").unwrap();
+        assert_eq!(found.len(), 1);
+        let m = found[0].meta().unwrap();
+        assert_eq!(m.credential_id, vec![0x6f, 0x15, 0x82, 0x74, 0xaa, 0xb6, 0x44, 0x3d, 0x9b, 0xcf, 0x8a, 0x3f, 0x69, 0x29, 0x7c, 0x88]);
+        assert_eq!(m.user_handle, vec![1, 2, 3]);
+        assert_eq!(m.user_name.as_deref(), Some("me@example.com"));
+        assert_eq!(m.rp_name.as_deref(), Some("Example Inc"));
+        assert_eq!(found[0].credential_id().unwrap(), m.credential_id);
+        assert_eq!(vault.all().unwrap().len(), 3);
+        // 一覧の取得では、秘密鍵（PasskeyGet）を一度も頼んでいない
+        assert!(seen.lock().unwrap().iter().all(|a| a["type"] != "PasskeyGet"));
+
+        // 鍵は decrypt() のときだけ、門に頼む
+        let p = found[0].decrypt().unwrap();
+        let der = decode_b64url(DER).unwrap();
+        let expected = p256::SecretKey::from_pkcs8_der(&der).unwrap().to_bytes();
+        assert_eq!(p.private_key.as_slice(), expected.as_slice());
+        assert_eq!((p.counter, p.discoverable, p.rp_id.as_str()), (0, true, "example.com"));
+        assert_eq!(p.user_handle, vec![1, 2, 3]);
+        let gets: Vec<_> = seen.lock().unwrap().iter().filter(|a| a["type"] == "PasskeyGet").cloned().collect();
+        assert_eq!(gets.len(), 1);
+        assert_eq!(gets[0]["ref"], "c1#0");
+
+        // 本人確認が通らない（門が Error）・対応しない鍵は、エラーにする
+        let denied = vault.find("other.example").unwrap();
+        assert!(denied[0].decrypt().err().unwrap().contains("authorization denied"));
+        let rsa = vault.find("rsa.example").unwrap();
+        assert!(rsa[0].decrypt().err().unwrap().contains("unsupported key"));
+
+        // 保存は門に頼む（暗号化・送信・本人確認は門がする。こちらは平文の欄を渡すだけ）
+        let new = NewPasskey {
+            credential_id: vec![1, 2, 3],
+            rp_id: "example.com".into(),
+            rp_name: Some("Example Inc".into()),
+            user_handle: vec![9, 9],
+            user_name: Some("me@example.com".into()),
+            user_display_name: None,
+            private_key: expected.as_slice().try_into().unwrap(),
+        };
+        assert_eq!(vault.save_new(&new).unwrap(), "Example Inc");
+        let add = seen.lock().unwrap().iter().rev().find(|a| a["type"] == "AddEntry").cloned().unwrap();
+        assert_eq!((add["kind"].as_str(), add["name"].as_str()), (Some("passkey"), Some("Example Inc")));
+        let c = &add["credential"];
+        assert_eq!(c["credentialId"], "b64.AQID");
+        assert_eq!(c["rpId"], "example.com");
+        assert_eq!(c["userHandle"], URL_SAFE_NO_PAD.encode([9, 9]));
+        assert_eq!((c["keyAlgorithm"].as_str(), c["keyCurve"].as_str(), c["counter"].as_str()), (Some("ECDSA"), Some("P-256"), Some("0")));
+        let saved_der = decode_b64url(c["keyValue"].as_str().unwrap()).unwrap();
+        assert_eq!(p256::SecretKey::from_pkcs8_der(&saved_der).unwrap().to_bytes(), expected);
+        assert!(c["userDisplayName"].is_null());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 門がないとき（単独）の経路を、偽の rbw・偽の agent・偽の API で確かめる。
+    /// 門の対応を足したあとも、従来の経路（rbw のトークンで /sync、rbw-agent で復号・暗号化、自分で保存）が動くことの確認
+    #[test]
+    fn legacy_backend() {
+        use std::collections::HashMap;
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        use std::sync::{Arc, Mutex};
+
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const DER: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTjEcVCu-owIHm5qhLE4Qhw76FZU2IQnTQa6J0xWoAfuhRANCAAS5AFVlTAJqFsaRvVi4mQ3nTnIoevSnIMf6FNtzpBFOttl6TrC0uo6PEihHFkD2472oFntw2oIYEs2N8Dgyp86w";
+        let profile = "rbw-legacytest";
+        let dir = std::env::temp_dir().join(format!("bwpk-legacy-test-{}", std::process::id()));
+        let (cfg, cache, run, bin) = (dir.join("cfg"), dir.join("cache"), dir.join("run"), dir.join("bin"));
+        for d in [cfg.join(profile), cache.join(profile), run.join(profile), bin.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+
+        // 偽の rbw（呼ばれた引数を記録するだけ。unlocked は成功を返す）
+        let log = dir.join("rbw.log");
+        std::fs::write(bin.join("rbw"), format!("#!/bin/sh\necho \"$@\" >> {}\nexit 0\n", log.display())).unwrap();
+        std::fs::set_permissions(bin.join("rbw"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // 偽の agent（rbw-agent と同じ JSON 行のプロトコル。暗号文 → 平文の表で復号し、暗号化は ENC(…) を付ける）
+        let plain: HashMap<&str, &str> = [
+            ("2.name|a|b", "Example"), ("2.rp|a|b", "example.com"), ("2.rpn|a|b", "Example Inc"),
+            ("2.cid|a|b", "6f158274-aab6-443d-9bcf-8a3f69297c88"), ("2.uh|a|b", "AQID"), ("2.un|a|b", "me@example.com"),
+            ("2.kv|a|b", DER), ("2.alg|a|b", "ECDSA"), ("2.crv|a|b", "P-256"), ("2.cnt|a|b", "0"), ("2.disc|a|b", "true"),
+        ].into_iter().collect();
+        let agent_seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let agent = UnixListener::bind(run.join(profile).join("socket")).unwrap();
+        let seen = agent_seen.clone();
+        std::thread::spawn(move || {
+            for stream in agent.incoming() {
+                let mut stream = stream.unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let action = serde_json::from_str::<Value>(&line).unwrap()["action"].clone();
+                seen.lock().unwrap().push(action.clone());
+                let res = match action["type"].as_str().unwrap() {
+                    "Decrypt" => match plain.get(action["cipherstring"].as_str().unwrap()) {
+                        Some(p) => json!({"type": "Decrypt", "plaintext": p}),
+                        None => json!({"type": "Error", "error": "unknown cipherstring"}),
+                    },
+                    "Encrypt" => json!({"type": "Encrypt", "cipherstring": format!("ENC({})", action["plaintext"].as_str().unwrap())}),
+                    _ => json!({"type": "Error", "error": "not expected"}),
+                };
+                writeln!(stream, "{res}").unwrap();
+            }
+        });
+
+        // 偽の Bitwarden API（HTTP。GET /api/sync でパスキー1件、POST は受けた内容を記録して成功を返す）
+        let sync = json!({"Ciphers": [{"Id": "c1", "Type": 1, "Name": "2.name|a|b", "Key": null, "OrganizationId": null,
+            "Login": {"Fido2Credentials": [{"credentialId": "2.cid|a|b", "keyAlgorithm": "2.alg|a|b", "keyCurve": "2.crv|a|b",
+                "keyValue": "2.kv|a|b", "rpId": "2.rp|a|b", "rpName": "2.rpn|a|b", "userHandle": "2.uh|a|b",
+                "userName": "2.un|a|b", "counter": "2.cnt|a|b", "discoverable": "2.disc|a|b"}]}}]});
+        let api = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = api.local_addr().unwrap().port();
+        let api_seen: Arc<Mutex<Vec<(String, String, String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = api_seen.clone();
+        std::thread::spawn(move || {
+            for stream in api.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                let mut parts = first.split_whitespace();
+                let (method, path) = (parts.next().unwrap().to_owned(), parts.next().unwrap().to_owned());
+                let (mut len, mut auth) = (0usize, String::new());
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    let h = h.trim_end().to_owned();
+                    if h.is_empty() {
+                        break;
+                    }
+                    let lower = h.to_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                    if lower.starts_with("authorization:") {
+                        auth = h["authorization:".len()..].trim().to_owned();
+                    }
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body).unwrap();
+                seen.lock().unwrap().push((method, path.clone(), String::from_utf8(body).unwrap(), auth));
+                let res = if path == "/api/sync" { sync.to_string() } else { r#"{"id":"new"}"#.to_owned() };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{res}", res.len()).unwrap();
+            }
+        });
+
+        // rbw の設定と DB（アクセストークン）。門のソケットは、存在しない場所に向ける
+        std::fs::write(cfg.join(profile).join("config.json"), json!({"email": "x@example.com", "base_url": format!("http://127.0.0.1:{port}")}).to_string()).unwrap();
+        std::fs::write(cache.join(profile).join("default:x@example.com.json"), json!({"access_token": "legacy-token"}).to_string()).unwrap();
+        // SAFETY: 環境変数を使うテストは、ENV_LOCK で1つずつ動かす
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &cfg);
+            std::env::set_var("XDG_CACHE_HOME", &cache);
+            std::env::set_var("XDG_RUNTIME_DIR", &run);
+            std::env::set_var("RBW_PROFILE", "legacytest");
+            std::env::set_var("BWVAULT_GATE_SOCKET", dir.join("no-such-gate.sock"));
+            std::env::set_var("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()));
+        }
+        assert!(!crate::gate::available(), "門がないはずの環境で、門が見つかった");
+
+        // 一覧: rbw のトークンで /sync を取り、メタ情報は rbw-agent で復号する。秘密鍵はまだ復号しない
+        let mut vault = Vault::new();
+        let found = vault.find("example.com").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].item_name, "Example");
+        let m = found[0].meta().unwrap();
+        assert_eq!(m.credential_id, vec![0x6f, 0x15, 0x82, 0x74, 0xaa, 0xb6, 0x44, 0x3d, 0x9b, 0xcf, 0x8a, 0x3f, 0x69, 0x29, 0x7c, 0x88]);
+        assert_eq!(m.user_handle, vec![1, 2, 3]);
+        assert_eq!((m.user_name.as_deref(), m.rp_name.as_deref(), m.user_display_name), (Some("me@example.com"), Some("Example Inc"), None));
+        {
+            let api = api_seen.lock().unwrap();
+            assert_eq!(api.len(), 1);
+            assert_eq!((api[0].0.as_str(), api[0].1.as_str(), api[0].3.as_str()), ("GET", "/api/sync", "Bearer legacy-token"));
+        }
+        let decrypts = |agent: &Arc<Mutex<Vec<Value>>>, cs: &str| agent.lock().unwrap().iter().filter(|a| a["type"] == "Decrypt" && a["cipherstring"] == cs).count();
+        assert_eq!(decrypts(&agent_seen, "2.kv|a|b"), 0, "メタ情報の段階で、秘密鍵を復号してしまっている");
+
+        // 鍵: decrypt() のときだけ、rbw-agent に復号させる
+        let p = found[0].decrypt().unwrap();
+        let der = decode_b64url(DER).unwrap();
+        let expected = p256::SecretKey::from_pkcs8_der(&der).unwrap().to_bytes();
+        assert_eq!(p.private_key.as_slice(), expected.as_slice());
+        assert_eq!((p.counter, p.discoverable, p.rp_id.as_str(), p.user_handle.clone()), (0, true, "example.com", vec![1, 2, 3]));
+        assert_eq!(decrypts(&agent_seen, "2.kv|a|b"), 1);
+
+        // 保存: 各欄を rbw-agent に暗号化させ、自分で POST /ciphers する（rbw のトークンで）
+        let new = NewPasskey {
+            credential_id: vec![1, 2, 3], rp_id: "example.com".into(), rp_name: Some("Example Inc".into()),
+            user_handle: vec![9, 9], user_name: Some("me@example.com".into()), user_display_name: None,
+            private_key: expected.as_slice().try_into().unwrap(),
+        };
+        assert_eq!(vault.save_new(&new).unwrap(), "Example Inc");
+        let (path, auth, body) = {
+            let api = api_seen.lock().unwrap();
+            let last = api.last().unwrap();
+            assert_eq!(last.0, "POST");
+            (last.1.clone(), last.3.clone(), serde_json::from_str::<Value>(&last.2).unwrap())
+        };
+        assert_eq!((path.as_str(), auth.as_str()), ("/api/ciphers", "Bearer legacy-token"));
+        let c = &body["login"]["fido2Credentials"][0];
+        let der_b64 = URL_SAFE_NO_PAD.encode(p256::SecretKey::from_slice(&new.private_key).unwrap().to_pkcs8_der().unwrap().as_bytes());
+        assert_eq!(body["name"], "ENC(Example Inc)");
+        assert_eq!(c["credentialId"], "ENC(b64.AQID)");
+        assert_eq!(c["rpId"], "ENC(example.com)");
+        assert_eq!(c["keyValue"], format!("ENC({der_b64})"));
+        assert_eq!((c["keyAlgorithm"].as_str(), c["keyCurve"].as_str()), (Some("ENC(ECDSA)"), Some("ENC(P-256)")));
+        assert_eq!(body["login"]["uris"][0]["uri"], "ENC(https://example.com)");
+        assert!(!body.to_string().contains(&der_b64.replace('\"', "")) || body.to_string().contains(&format!("ENC({der_b64})")), "鍵の平文が、そのまま API に出ている");
+        assert!(c["userDisplayName"].is_null());
+
+        // rbw の呼び出し: 保管庫が開いているかを確かめ、保存のあとに同期させる
+        let mut log_text = String::new();
+        for _ in 0..40 {
+            log_text = std::fs::read_to_string(&log).unwrap_or_default();
+            if log_text.lines().any(|l| l.trim() == "sync") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // 保管庫が開いているかの確認は、一覧の取得（refresh）と、保存（save_new）の、それぞれの前に1回ずつ
+        assert_eq!(log_text.lines().filter(|l| l.trim() == "unlocked").count(), 2, "rbw unlocked の呼び出しが、2回ではない: {log_text:?}");
+        assert!(log_text.lines().any(|l| l.trim() == "sync"), "保存のあとの rbw sync が呼ばれていない: {log_text:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

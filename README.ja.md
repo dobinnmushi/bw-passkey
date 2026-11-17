@@ -48,8 +48,27 @@ bw-passkey は、Bitwarden にすでにあるパスキー（公式のアプリ�
    サイトに答える前に `POST /ciphers` で新しいログイン項目として保存する。保存に失敗したら登録も失敗する。
    そのあと `rbw sync` を走らせ、rbw からも新しい項目が見えるようにする。
 
+## 単独で使う場合と bw-vault と使う場合
+bw-passkey には2つの裏方（バックエンド）があり、自分で選ぶ。
+
+| | 単独（既定） | [bw-vault](https://github.com/dobinnmushi/bw-vault)（姉妹品。公開予定）と一緒 |
+|---|---|---|
+| 選ばれる条件 | bw-vault のソケットがない | `/run/bwvault-gate/gate.sock` がある（場所は `BWVAULT_GATE_SOCKET` で変えられる） |
+| 保管庫の鍵とトークン | あなたのユーザー側（rbw-agent のメモリと rbw の DB） | 別のユーザー（`bwvault`）の側。こちらからは読めない |
+| 本人確認 | bw-passkey が指紋を求める（「仕組み」を参照） | bw-vault の門が polkit（指紋、だめなら `sudo` と同じパスワード）で確認し、bw-passkey 自身は何も求めない |
+| パスキーの読み出し | そのサイトのパスキーを、先に全部復号する | そのサイトのパスキーを（名前だけ）一覧し（確認1回）、選んでから、**選んだ1つの秘密鍵だけ**を取る。その確認には、サイトとユーザー名が出る |
+| パスキーの作成 | rbw-agent で暗号化して、自分で `POST` する | 欄を門に渡す。門が確認を求め、暗号化して、サイトに答える前に保存する |
+| `bw-passkey --list` | 鍵まで読めるかを確かめる | 鍵は取らない（1つずつ確認が出るため） |
+
+bw-vault と一緒のとき、ブラウザの「本人確認（UV）」「操作の確認（UP）」の要求には、確認を重ねずに答える。署名には秘密鍵が要り、
+秘密鍵は確認なしには出てこないので、確認はもう済んでいるため。作成も同じで、門の確認が通らなければ、何も保存されず、登録も失敗する。
+
+bw-vault が入っていても単独の裏方を使いたいときは、`BWVAULT_GATE_SOCKET` を存在しない場所に向ける
+（`systemctl --user edit bw-passkey` で `Environment=BWVAULT_GATE_SOCKET=/nonexistent`）。
+
 ## 必要なもの
-- [rbw](https://github.com/doy/rbw)（ログイン済み。必要なら `rbw unlock` を呼ぶ）、fprintd（任意）、notify-send
+- [rbw](https://github.com/doy/rbw)（ログイン済み。必要なら `rbw unlock` を呼ぶ）、fprintd（任意）、notify-send。
+  [bw-vault](#単独で使う場合と-bw-vault-と使う場合) と使うときは、rbw と fprintd は bw-vault が使う
 - `/dev/uhid` への書き込み権限（最初に1回、sudo で）:
   ```
   echo 'KERNEL=="uhid", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uhid"' | sudo tee /etc/udev/rules.d/70-uhid-uaccess.rules
@@ -73,6 +92,7 @@ bw-passkey は、Bitwarden にすでにあるパスキー（公式のアプリ�
 - Bitwarden のブラウザ拡張がパスキーを扱う設定だと、拡張が先に答える。拡張の「設定 → 通知」の
   「パスキーの保存と使用を確認する」をオフにすると、ブラウザがこのキーを使う。
 - ソフトウェアのキーなので、守りの強さは「保管庫が開いている間」と同じ。自分の権限で動くプログラムは、どのみち rbw-agent と話せる。席を立つときは画面ロック。
+  または、鍵をあなたのユーザーの外に置く [bw-vault](#単独で使う場合と-bw-vault-と使う場合) を使う。
 - 他の道具から取り込んだ、カウンタが 0 でないパスキーにも 0 で答える。サイトによっては拒まれる。
 - 作るパスキーは常にサイトに保存される型（discoverable / resident）にし、すべて保管庫に入れる。
 - Snap や Flatpak のアプリは、箱の設定がセキュリティキーを許すとき（Snap なら `u2f-devices` インタフェース）だけ使える。

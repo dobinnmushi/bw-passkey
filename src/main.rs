@@ -8,6 +8,7 @@
 //!   hid.rs     USB HID（CTAPHID）のやり取り
 //!   vault.rs   保管庫からパスキーを集める（rbw のトークンで /sync、復号は rbw-agent）
 //!   agent.rs   rbw-agent に復号を頼む
+//!   gate.rs    bw-vault の門（あれば、保管庫の読み書きと本人確認は門に任せる）
 //!   verify.rs  本人確認（指紋 → だめならマスターパスワード）
 //!   choose.rs  同じサイトのパスキーが複数あるとき選ぶ画面（bw-passkey --choose）
 
@@ -15,6 +16,7 @@
 mod i18n;
 mod agent;
 mod choose;
+mod gate;
 mod hid;
 mod verify;
 mod vault;
@@ -77,35 +79,35 @@ struct Callbacks {
 
 impl Callbacks {
     /// 同じサイトのパスキーが複数あるとき、1件に絞る（直前に選んでいればそれ、なければ選ぶ画面を出す）。
-    /// 閉じられたら空にする
-    fn choose(&self, rp_id: &str, mut found: Vec<(vault::Passkey, String)>) -> Vec<Credential> {
+    /// 閉じられたら空にする。メタ情報だけで選べるので、選ぶまで秘密鍵は取らない
+    fn choose(&self, rp_id: &str, mut found: Vec<(vault::EncPasskey, vault::Meta)>) -> Vec<vault::EncPasskey> {
         if let Some((t, rp, id)) = self.last_choice.lock().unwrap().as_ref()
             && t.elapsed() < CHOICE_REUSE
             && rp == rp_id
-            && let Some(p) = found.iter().find(|(p, _)| &p.credential_id == id)
+            && let Some(p) = found.iter().find(|(_, m)| &m.credential_id == id)
         {
-            return vec![to_credential(&p.0)];
+            return vec![p.0.clone()];
         }
         if let Some(id) = self.preferred.lock().unwrap().get(rp_id)
-            && let Some(i) = found.iter().position(|(p, _)| &p.credential_id == id)
+            && let Some(i) = found.iter().position(|(_, m)| &m.credential_id == id)
         {
             let first = found.remove(i);
             found.insert(0, first);
         }
         let choices: Vec<choose::Choice> = found
             .iter()
-            .map(|(p, item)| choose::Choice {
-                title: item.clone(),
-                user: p.user_name.clone().unwrap_or_default(),
-                detail: p.user_display_name.clone().filter(|d| Some(d) != p.user_name.as_ref()).unwrap_or_default(),
+            .map(|(enc, m)| choose::Choice {
+                title: enc.item_name.clone(),
+                user: m.user_name.clone().unwrap_or_default(),
+                detail: m.user_display_name.clone().filter(|d| Some(d) != m.user_name.as_ref()).unwrap_or_default(),
             })
             .collect();
         match choose::ask(rp_id, &choices) {
             Some(i) => {
-                let id = found[i].0.credential_id.clone();
+                let id = found[i].1.credential_id.clone();
                 *self.last_choice.lock().unwrap() = Some((Instant::now(), rp_id.to_owned(), id.clone()));
                 self.preferred.lock().unwrap().insert(rp_id.to_owned(), id);
-                vec![to_credential(&found[i].0)]
+                vec![found[i].0.clone()]
             }
             None => {
                 log::info!("{rp_id}: choice cancelled");
@@ -211,12 +213,13 @@ impl AuthenticatorCallbacks for Callbacks {
             self.verifier.notify(&tr!("保管庫からパスキーを読めませんでした: {e}", "Could not read passkeys from the vault: {e}"));
             soft_fido2::Error::Other
         })?;
+        // まずメタ情報だけで絞る（秘密鍵は、使うと決まった1つだけ、あとで取る）
         let mut matched = Vec::new();
         for enc in found {
-            match enc.decrypt() {
-                Ok(p) if user_id.is_none_or(|u| u == p.user_handle.as_slice()) => matched.push((p, enc.item_name.clone())),
+            match enc.meta() {
+                Ok(m) if user_id.is_none_or(|u| u == m.user_handle.as_slice()) => matched.push((enc, m)),
                 Ok(_) => {}
-                Err(e) => log::warn!("could not decrypt a passkey ({}): {e}", enc.item_name),
+                Err(e) => log::warn!("could not read a passkey ({}): {e}", enc.item_name),
             }
         }
         log::info!("{rp_id}: {} passkey(s)", matched.len());
@@ -225,10 +228,25 @@ impl AuthenticatorCallbacks for Callbacks {
         }
         drop(vault);
         // 複数あれば、ブラウザに選ばせず、ここで1件に絞る（ブラウザの選ぶ画面は名前でしか区別できないため）
-        if matched.len() > 1 {
-            return Ok(self.choose(rp_id, matched));
+        let chosen: Vec<vault::EncPasskey> = if matched.len() > 1 {
+            self.choose(rp_id, matched)
+        } else {
+            matched.into_iter().map(|(enc, _)| enc).collect()
+        };
+        // 秘密鍵を取る。門があれば、ここで本人確認（指紋）が出る
+        let mut out = Vec::new();
+        for enc in chosen {
+            match enc.decrypt() {
+                Ok(p) => out.push(to_credential(&p)),
+                Err(e) => {
+                    log::warn!("could not decrypt a passkey ({}): {e}", enc.item_name);
+                    if gate::available() {
+                        self.verifier.notify(&tr!("パスキーを取り出せませんでした: {e}", "Could not get the passkey: {e}"));
+                    }
+                }
+            }
         }
-        Ok(matched.iter().map(|(p, _)| to_credential(p)).collect())
+        Ok(out)
     }
 
     fn enumerate_rps(&self) -> Result<Vec<(String, Option<String>, usize)>> {
@@ -249,7 +267,7 @@ impl AuthenticatorCallbacks for Callbacks {
     }
 }
 
-/// --list: 保管庫のパスキーを、秘密を出さずに一覧する（読めるかの確認用）
+/// --list: 保管庫のパスキーを、秘密を出さずに一覧する（読めるかの確認用）。門があるときは、鍵を取らない（確認が出るため）
 fn list() -> i32 {
     let mut vault = vault::Vault::new();
     let all = match vault.all() {
@@ -261,6 +279,11 @@ fn list() -> i32 {
     };
     let mut bad = 0;
     for enc in &all {
+        if gate::available() {
+            let user = enc.meta().ok().and_then(|m| m.user_name).unwrap_or_default();
+            println!("{}\t{}\t{user}", enc.item_name, enc.rp_id);
+            continue;
+        }
         match enc.decrypt() {
             Ok(p) => println!("{}\t{}\t{}\t{}{}", enc.item_name, p.rp_id, p.user_name.as_deref().unwrap_or(""), tr!("鍵OK", "key OK"),
                               if p.counter > 0 { tr!("（カウンタ {}）", " (counter {})", p.counter) } else { String::new() }),

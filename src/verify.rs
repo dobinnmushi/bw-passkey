@@ -1,4 +1,6 @@
-//! 本人確認（指紋）。bw-autotype と同じ方針:
+//! 本人確認（指紋）。bw-vault の門があるときは、門が秘密鍵を渡す前（と、パスキーを保存する前）に polkit で本人確認をするので、
+//! ここでは確認しない（鍵がなければ署名できず、鍵は確認なしには得られないので、ブラウザの UV・UP の要求はそのまま通してよい）。
+//! 門がないときは、bw-autotype と同じ方針:
 //! - 保管庫がロック中なら、マスターパスワードで開くこと自体を本人確認とする。
 //! - 指紋（fprintd-verify）が一致すれば通す。
 //! - 指紋が使えない・一致しないときは、保管庫をロックし直してマスターパスワードを聞く（それより弱い経路にしない）。
@@ -82,6 +84,9 @@ impl Verifier {
 
     /// 本人確認（UV）。通れば true
     pub fn verify(&self, rp_id: &str) -> bool {
+        if crate::gate::available() {
+            return true;
+        }
         let ok = if !Command::new("rbw").arg("unlocked").status().is_ok_and(|s| s.success()) {
             // 保管庫がロック中: マスターパスワードで開くこと自体を本人確認とする（指紋と二重に求めない）
             log::info!("verification: vault locked, unlocking with the master password ({rp_id})");
@@ -107,6 +112,9 @@ impl Verifier {
 
     /// 本人の操作の確認（UP）。同じサイトで直前に本人確認が済んでいればそれを使い、なければ本人確認と同じことをする
     pub fn presence(&self, rp_id: &str) -> bool {
+        if crate::gate::available() {
+            return true;
+        }
         let recent = self.last.lock().unwrap().as_ref().is_some_and(|(t, rp)| t.elapsed() < REUSE && rp == rp_id);
         recent || self.verify(rp_id)
     }

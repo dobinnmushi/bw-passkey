@@ -53,9 +53,28 @@ saves new ones there, so they keep syncing to your other devices, and it works w
    personal vault key and saved as a new login item with `POST /ciphers` before the site gets its answer, so a
    failed save also fails the registration. `rbw sync` runs afterwards so rbw sees the new item.
 
+## Standalone, or with bw-vault
+bw-passkey has two backends and picks one by itself.
+
+| | Standalone (default) | With [bw-vault](https://github.com/dobinnmushi/bw-vault) (companion, to be published) |
+|---|---|---|
+| Chosen when | bw-vault's socket does not exist | `/run/bwvault-gate/gate.sock` exists (override the path with `BWVAULT_GATE_SOCKET`) |
+| Vault key and token | in your user: rbw-agent's memory and rbw's database | under a separate user (`bwvault`); nothing here can read them |
+| Identity check | bw-passkey asks for your fingerprint (see "How it works") | bw-vault's gate asks polkit — fingerprint, then your password, like `sudo` — and bw-passkey asks for nothing itself |
+| Reading passkeys | decrypts every passkey of the site up front | lists the site's passkeys (names only) with one confirmation, lets you choose, then fetches **only the chosen private key**; its confirmation names the site and user |
+| Creating a passkey | encrypts with rbw-agent and `POST`s it itself | hands the fields to the gate, which asks for a confirmation, encrypts and saves them before the site gets its answer |
+| `bw-passkey --list` | shows keys as readable | does not fetch keys (it would ask for each one) |
+
+With bw-vault, the browser's "user verification" and "user presence" requests are answered without a second prompt: a
+signature needs the private key, and the private key is not released without a confirmation, so the check has already happened.
+Creating a passkey is the same: if the gate's confirmation fails, nothing is saved and the registration fails.
+
+To use the standalone backend even though bw-vault is installed, point `BWVAULT_GATE_SOCKET` at a path that does not exist
+(`systemctl --user edit bw-passkey`, then `Environment=BWVAULT_GATE_SOCKET=/nonexistent`).
+
 ## Requirements
 - [rbw](https://github.com/doy/rbw) (logged in; `rbw unlock` is run when needed), fprintd (optional),
-  notify-send
+  notify-send. With [bw-vault](#standalone-or-with-bw-vault), rbw and fprintd are used by bw-vault instead
 - Write access to `/dev/uhid` (once, with sudo):
   ```
   echo 'KERNEL=="uhid", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uhid"' | sudo tee /etc/udev/rules.d/70-uhid-uaccess.rules
@@ -79,7 +98,7 @@ logged in. Logs: `journalctl --user -u bw-passkey`. `./uninstall.sh` removes bot
 - If the Bitwarden browser extension is set to handle passkeys, it answers first. Turn off "Ask to save and use
   passkeys" in the extension (Settings → Notifications) to let the browser use this key.
 - A software key is only as safe as your unlocked vault: anything running as you can talk to rbw-agent anyway.
-  Lock your screen when you leave.
+  Lock your screen when you leave, or use [bw-vault](#standalone-or-with-bw-vault), which keeps the key out of your user.
 - Passkeys imported with a non-zero counter are answered with counter 0; a site may reject that.
 - Passkeys are always created as discoverable (resident) credentials, so they are all stored in the vault.
 - Snap or Flatpak apps can only use security keys if their confinement allows it (for snaps, the
