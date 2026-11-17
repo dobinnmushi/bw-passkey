@@ -246,9 +246,19 @@ impl Vault {
         let text = |v: &Value, k: &str| v[k].as_str().map(str::to_owned);
         let mut found = Vec::new();
         for p in res["passkeys"].as_array().into_iter().flatten() {
+            // 形式の読めない1件があっても、ほかのパスキーは使えるように、その1件だけ飛ばす（従来の経路と同じ）
+            let ids = parse_credential_id(p["credential_id"].as_str().unwrap_or(""))
+                .and_then(|c| decode_b64url(p["user_handle"].as_str().unwrap_or("")).map(|u| (c, u)));
+            let (credential_id, user_handle) = match ids {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("could not read a passkey ({}): {e}", text(p, "item_name").unwrap_or_default());
+                    continue;
+                }
+            };
             let meta = Meta {
-                credential_id: parse_credential_id(p["credential_id"].as_str().unwrap_or(""))?,
-                user_handle: decode_b64url(p["user_handle"].as_str().unwrap_or(""))?,
+                credential_id,
+                user_handle,
                 rp_name: text(p, "rp_name"),
                 user_name: text(p, "user_name"),
                 user_display_name: text(p, "user_display_name"),
@@ -558,7 +568,9 @@ mod tests {
                         {"ref": "bad#0", "item_name": "Other", "rp_id": "other.example", "rp_name": null,
                          "credential_id": "b64.BAUG", "user_handle": "", "user_name": null, "user_display_name": null},
                         {"ref": "rsa#0", "item_name": "Rsa", "rp_id": "rsa.example", "rp_name": null,
-                         "credential_id": "b64.BwgJ", "user_handle": "", "user_name": null, "user_display_name": null}]}),
+                         "credential_id": "b64.BwgJ", "user_handle": "", "user_name": null, "user_display_name": null},
+                        {"ref": "broken#0", "item_name": "Broken", "rp_id": "broken.example", "rp_name": null,
+                         "credential_id": "not-a-credential-id", "user_handle": "", "user_name": null, "user_display_name": null}]}),
                     "PasskeyGet" => match action["ref"].as_str().unwrap() {
                         "c1#0" => json!({"type": "Passkey", "key_value": DER, "key_algorithm": "ECDSA", "key_curve": "P-256",
                                          "counter": "0", "discoverable": "true"}),
@@ -583,7 +595,9 @@ mod tests {
         assert_eq!(m.user_name.as_deref(), Some("me@example.com"));
         assert_eq!(m.rp_name.as_deref(), Some("Example Inc"));
         assert_eq!(found[0].credential_id().unwrap(), m.credential_id);
+        // 形式の読めない1件（broken）は飛ばし、ほかの3件は使える
         assert_eq!(vault.all().unwrap().len(), 3);
+        assert!(vault.find("broken.example").unwrap().is_empty());
         // 一覧の取得では、秘密鍵（PasskeyGet）を一度も頼んでいない
         assert!(seen.lock().unwrap().iter().all(|a| a["type"] != "PasskeyGet"));
 
