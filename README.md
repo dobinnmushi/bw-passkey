@@ -30,7 +30,7 @@ offers itself, or turn off its passkey offers.
 | Option | Passkeys from the Bitwarden vault outside the extension | Notes |
 |---|---|---|
 | Bitwarden browser extension | – | Works in the browser where the extension intercepts WebAuthn. It can't answer the browser's own "use a security key" prompt or apps, and on Linux its fingerprint unlock goes through the desktop app and is often unreliable. |
-| Bitwarden desktop app | – | Native passkey support is [in progress](https://community.bitwarden.com/t/desktop-app-auto-type-windows-macos-linux/158), with the roadmap mentioning Windows and macOS. |
+| Bitwarden desktop app | – | Native passkey support is [marked as released](https://community.bitwarden.com/t/71975) for Windows and macOS; for Linux there is only [an open request](https://community.bitwarden.com/t/97541). |
 | Hardware security key (YubiKey etc.) | – | Works everywhere, but the keys live on the device, not in your vault, so they don't sync. |
 | Other software FIDO2 keys ([passless](https://github.com/pando85/passless) etc.) | – | Same virtual-key idea (bw-passkey is built on passless's library, soft-fido2), but they store keys in pass, a TPM or files, not in Bitwarden. |
 | [Credentials for Linux](https://github.com/linux-credentials) (credentialsd) | – | A system passkey service for Linux, still in development; browser integration is experimental. |

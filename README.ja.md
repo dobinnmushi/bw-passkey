@@ -28,7 +28,7 @@ Chrome では、Google パスワード マネージャーが出てきたら「�
 | 手段 | 拡張の外で、Bitwarden の保管庫のパスキーを使えるか | 備考 |
 |---|---|---|
 | Bitwarden のブラウザ拡張 | × | 拡張が WebAuthn を横取りできるブラウザの中だけ。ブラウザ自身の「セキュリティキーを使う」画面やアプリには答えられず、Linux では指紋での解除がデスクトップ版アプリ経由で不安定なことが多い。 |
-| Bitwarden のデスクトップ版アプリ | × | パスキーへの対応は[開発中](https://community.bitwarden.com/t/desktop-app-auto-type-windows-macos-linux/158)で、ロードマップにあるのは Windows と macOS。 |
+| Bitwarden のデスクトップ版アプリ | × | パスキーのネイティブ対応は、Windows と macOS では[提供済みの印](https://community.bitwarden.com/t/71975)が付いているが、Linux は[要望の段階](https://community.bitwarden.com/t/97541)。 |
 | 本物のセキュリティキー（YubiKey など） | × | どこでも使えるが、鍵はその機器の中にあり、保管庫に入らないので同期しない。 |
 | ほかのソフトウェアの FIDO2 キー（[passless](https://github.com/pando85/passless) など） | × | 仮想のキーという考え方は同じ（bw-passkey は passless の部品 soft-fido2 を使っている）が、鍵は pass・TPM・ファイルに置き、Bitwarden には置かない。 |
 | [Credentials for Linux](https://github.com/linux-credentials)（credentialsd） | × | Linux のパスキーの仕組みとして開発中。ブラウザとの連携は試験的。 |
