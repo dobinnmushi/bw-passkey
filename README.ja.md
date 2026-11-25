@@ -51,7 +51,7 @@ bw-passkey は、Bitwarden にすでにあるパスキー（公式のアプリ�
 ## 単独で使う場合と bw-vault と使う場合
 bw-passkey には2つの裏方（バックエンド）があり、自分で選ぶ。
 
-| | 単独（既定） | [bw-vault](https://github.com/dobinnmushi/bw-vault)（姉妹品。公開予定）と一緒 |
+| | 単独（既定） | [bw-vault](https://github.com/dobinnmushi/bw-vault)（姉妹品）と一緒 |
 |---|---|---|
 | 選ばれる条件 | bw-vault のソケットがない | `/run/bwvault-gate/gate.sock` がある（場所は `BWVAULT_GATE_SOCKET` で変えられる） |
 | 保管庫の鍵とトークン | あなたのユーザー側（rbw-agent のメモリと rbw の DB） | 別のユーザー（`bwvault`）の側。こちらからは読めない |

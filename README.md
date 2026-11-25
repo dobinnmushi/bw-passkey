@@ -56,7 +56,7 @@ saves new ones there, so they keep syncing to your other devices, and it works w
 ## Standalone, or with bw-vault
 bw-passkey has two backends and picks one by itself.
 
-| | Standalone (default) | With [bw-vault](https://github.com/dobinnmushi/bw-vault) (companion, to be published) |
+| | Standalone (default) | With [bw-vault](https://github.com/dobinnmushi/bw-vault) (companion) |
 |---|---|---|
 | Chosen when | bw-vault's socket does not exist | `/run/bwvault-gate/gate.sock` exists (override the path with `BWVAULT_GATE_SOCKET`) |
 | Vault key and token | in your user: rbw-agent's memory and rbw's database | under a separate user (`bwvault`); nothing here can read them |
